@@ -38,7 +38,11 @@ def download_video(url, cookies_file):
     ]
     if cookies_file:
         cmd += ["--cookies", cookies_file]
-    subprocess.run(cmd, check=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print(result.stdout)
+    print(result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-800:] or result.stdout[-800:])
     for f in os.listdir("."):
         if f.startswith("download."):
             return f
