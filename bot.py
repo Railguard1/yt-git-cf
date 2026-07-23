@@ -48,10 +48,12 @@ def client_args(cookies_file):
 
 
 def list_formats(url, cookies_file):
-    cmd = ["yt-dlp", "-J", "--no-warnings", "--no-playlist"] + client_args(cookies_file) + [url]
+    cmd = ["yt-dlp", "-v", "-J", "--no-warnings", "--no-playlist"] + client_args(cookies_file) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    print(result.stdout[-2000:])
-    print(result.stderr[-2000:])
+    print("---- STDOUT ----")
+    print(result.stdout[:1500])
+    print("---- STDERR (full) ----")
+    print(result.stderr)
     if result.returncode != 0:
         raise RuntimeError(result.stderr[-800:] or result.stdout[-800:])
 
