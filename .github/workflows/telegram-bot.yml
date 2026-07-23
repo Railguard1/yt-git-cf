@@ -37,6 +37,10 @@ jobs:
         with:
           node-version: 20
 
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Install yt-dlp and PO token plugin
         run: pip install -U -r requirements.txt bgutil-ytdlp-pot-provider
 
