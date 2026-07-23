@@ -3,9 +3,9 @@ import re
 import json
 import time
 import base64
+import unicodedata
 import subprocess
 import requests
-from urllib.parse import quote
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 REPO = os.environ["GITHUB_REPOSITORY"]
@@ -34,6 +34,14 @@ def send_photo(photo_url, caption, reply_markup=None):
     resp = requests.post(f"{API}/sendPhoto", json=payload)
     if not resp.ok:
         send_message(caption, reply_markup)
+
+
+def edit_message(message_id, text):
+    if not message_id:
+        return
+    requests.post(f"{API}/editMessageText", json={
+        "chat_id": CHAT_ID, "message_id": message_id, "text": text,
+    })
 
 
 def setup_cookies():
@@ -137,15 +145,21 @@ def build_selector(fmt):
     return f"bv*[height<={fmt}]+ba/b[height<={fmt}]"
 
 
-def sanitize_for_url(filename):
+def ascii_safe_name(filename):
+    """Strip the filename down to plain ASCII letters/digits so it never
+    trips up gh's upload syntax or GitHub's own asset-name rewriting."""
     name, ext = os.path.splitext(filename)
-    name = re.sub(r'[#\\/:*?"<>|]', '_', name)
-    name = re.sub(r'\s+', '_', name)
-    name = re.sub(r'_+', '_', name).strip('_')
+    name = unicodedata.normalize("NFKD", name)
+    name = name.encode("ascii", "ignore").decode("ascii")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+    name = re.sub(r"_+", "_", name).strip("_.")
+    if not name:
+        name = "video"
     return f"{name}{ext}"
 
 
 def download_video(url, cookies_file, fmt):
+    """Downloads the video and returns (safe_filename, display_title)."""
     before = set(os.listdir("."))
     cmd = ["yt-dlp", "-f", build_selector(fmt), "--no-playlist", "-o", "%(title)s.%(ext)s"]
     if fmt != "audio":
@@ -167,11 +181,12 @@ def download_video(url, cookies_file, fmt):
     if not new_files:
         raise FileNotFoundError("downloaded file not found")
 
-    file_path = new_files[0]
-    clean_path = sanitize_for_url(file_path)
-    if clean_path != file_path:
-        os.rename(file_path, clean_path)
-    return clean_path
+    original_name = new_files[0]
+    title = os.path.splitext(original_name)[0]
+    safe_name = ascii_safe_name(original_name)
+    if safe_name != original_name:
+        os.rename(original_name, safe_name)
+    return safe_name, title
 
 
 def upload_to_release(file_path, tag):
@@ -198,20 +213,12 @@ def upload_to_release(file_path, tag):
     raise RuntimeError("could not retrieve the uploaded asset URL from GitHub after several attempts")
 
 
-def edit_message(message_id, text):
-    if not message_id:
-        return
-    requests.post(f"{API}/editMessageText", json={
-        "chat_id": CHAT_ID, "message_id": message_id, "text": text,
-    })
-
-
 def download_and_send(url, cookies_file, fmt, status_message_id=None, label=None):
-    file_path = download_video(url, cookies_file, fmt)
+    file_path, title = download_video(url, cookies_file, fmt)
     tag = f"vid-{int(time.time())}-{os.getpid()}"
     link = upload_to_release(file_path, tag)
     edit_message(status_message_id, f"{label + ' ' if label else ''}دانلود تمام شد ✅")
-    send_message(link)
+    send_message(f"{title}\n{link}")
     os.remove(file_path)
 
 
@@ -237,10 +244,10 @@ def download_playlist(url, cookies_file, fmt, status_message_id=None):
         edit_message(status_message_id, f"در حال دانلود ({i}/{len(entries)})... ⏳")
         video_url = f"https://www.youtube.com/watch?v={e['id']}"
         try:
-            file_path = download_video(video_url, cookies_file, fmt)
+            file_path, title = download_video(video_url, cookies_file, fmt)
             tag = f"vid-{int(time.time())}-{i}"
             link = upload_to_release(file_path, tag)
-            send_message(f"✅ ({i}/{len(entries)}) {link}")
+            send_message(f"✅ ({i}/{len(entries)}) {title}\n{link}")
             os.remove(file_path)
             done += 1
         except Exception as ex:
