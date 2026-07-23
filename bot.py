@@ -5,6 +5,7 @@ import time
 import base64
 import subprocess
 import requests
+from urllib.parse import quote
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 REPO = os.environ["GITHUB_REPOSITORY"]
@@ -15,6 +16,7 @@ URL = os.environ["VIDEO_URL"]
 CHAT_ID = os.environ["CHAT_ID"]
 FORMAT = os.environ.get("FORMAT", "720")
 
+STATUS_MESSAGE_ID = os.environ.get("STATUS_MESSAGE_ID") or None
 MAX_PLAYLIST_ITEMS = 20
 
 
@@ -169,54 +171,77 @@ def download_video(url, cookies_file, fmt):
 
 
 def upload_to_release(file_path, tag):
-    subprocess.run(
+    create = subprocess.run(
         ["gh", "release", "create", tag, file_path, "--title", tag, "--notes", "auto upload"],
-        check=True,
+        capture_output=True, text=True,
     )
-    result = subprocess.run(
-        ["gh", "release", "view", tag, "--json", "assets", "-q", ".assets[0].browser_download_url"],
-        capture_output=True, text=True, check=True,
-    )
-    return result.stdout.strip()
+    print("gh release create stdout:", create.stdout)
+    print("gh release create stderr:", create.stderr)
+    if create.returncode != 0:
+        raise RuntimeError(f"gh release create failed: {create.stderr[-500:]}")
+
+    for _ in range(5):
+        view = subprocess.run(
+            ["gh", "release", "view", tag, "--json", "assets", "-q", ".assets[0].browser_download_url"],
+            capture_output=True, text=True,
+        )
+        link = view.stdout.strip()
+        if link and link != "null":
+            return link
+        time.sleep(2)
+
+    return f"https://github.com/{REPO}/releases/download/{tag}/{quote(file_path)}"
 
 
-def download_and_send(url, cookies_file, fmt, label=None):
+def edit_message(message_id, text):
+    if not message_id:
+        return
+    requests.post(f"{API}/editMessageText", json={
+        "chat_id": CHAT_ID, "message_id": message_id, "text": text,
+    })
+
+
+def download_and_send(url, cookies_file, fmt, status_message_id=None, label=None):
     file_path = download_video(url, cookies_file, fmt)
     tag = f"vid-{int(time.time())}-{os.getpid()}"
     link = upload_to_release(file_path, tag)
-    prefix = f"{label}\n" if label else ""
-    send_message(f"{prefix}دانلود شد ✅\n{link}")
+    edit_message(status_message_id, f"{label + ' ' if label else ''}دانلود تمام شد ✅")
+    send_message(link)
     os.remove(file_path)
 
 
-def download_playlist(url, cookies_file, fmt):
+def download_playlist(url, cookies_file, fmt, status_message_id=None):
     cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies_file) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        send_message(f"خطا در خواندن پلی‌لیست: {result.stderr[-800:]}")
+        edit_message(status_message_id, f"خطا در خواندن پلی‌لیست: {result.stderr[-500:]}")
         return
 
     info = json.loads(result.stdout)
     entries = [e for e in info.get("entries", []) if e.get("id")]
     total = len(entries)
     if total == 0:
-        send_message("هیچ ویدیویی در این پلی‌لیست پیدا نشد.")
+        edit_message(status_message_id, "هیچ ویدیویی در این پلی‌لیست پیدا نشد.")
         return
 
     if total > MAX_PLAYLIST_ITEMS:
         entries = entries[:MAX_PLAYLIST_ITEMS]
 
-    send_message(f"شروع دانلود {len(entries)} ویدیو از پلی‌لیست...")
     done = 0
     for i, e in enumerate(entries, 1):
+        edit_message(status_message_id, f"در حال دانلود ({i}/{len(entries)})... ⏳")
         video_url = f"https://www.youtube.com/watch?v={e['id']}"
         try:
-            download_and_send(video_url, cookies_file, fmt, label=f"({i}/{len(entries)})")
+            file_path = download_video(video_url, cookies_file, fmt)
+            tag = f"vid-{int(time.time())}-{i}"
+            link = upload_to_release(file_path, tag)
+            send_message(f"✅ ({i}/{len(entries)}) {link}")
+            os.remove(file_path)
             done += 1
         except Exception as ex:
             send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}")
 
-    send_message(f"پایان پلی‌لیست: {done} از {len(entries)} ویدیو با موفقیت دانلود شد.")
+    edit_message(status_message_id, f"پایان پلی‌لیست: {done} از {len(entries)} ویدیو با موفقیت دانلود شد. ✅")
 
 
 def main():
@@ -230,13 +255,15 @@ def main():
         return
 
     if is_playlist_url(URL):
-        download_playlist(URL, cookies_file, FORMAT)
+        download_playlist(URL, cookies_file, FORMAT, STATUS_MESSAGE_ID)
         return
 
     try:
-        download_and_send(URL, cookies_file, FORMAT)
+        download_and_send(URL, cookies_file, FORMAT, status_message_id=STATUS_MESSAGE_ID)
     except Exception as e:
-        send_message(f"خطا در دانلود: {e}")
+        edit_message(STATUS_MESSAGE_ID, f"خطا در دانلود: {e}")
+        if not STATUS_MESSAGE_ID:
+            send_message(f"خطا در دانلود: {e}")
 
 
 if __name__ == "__main__":
