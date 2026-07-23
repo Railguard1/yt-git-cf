@@ -2,21 +2,29 @@ name: Telegram YouTube Downloader
 
 on:
   repository_dispatch:
-    types: [yt_download]
+    types: [yt_list_formats, yt_download]
   workflow_dispatch:
     inputs:
+      mode:
+        description: "list or download"
+        required: true
+        default: "download"
       url:
         description: "YouTube URL"
         required: true
       chat_id:
         description: "Telegram chat id"
         required: true
+      format:
+        description: "height (e.g. 720) or audio"
+        required: false
+        default: "720"
 
 permissions:
   contents: write
 
 jobs:
-  download:
+  run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +41,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODE: ${{ github.event.action == 'yt_list_formats' && 'list' || (github.event.inputs.mode || 'download') }}
           VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
           CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
+          FORMAT: ${{ github.event.client_payload.format || github.event.inputs.format || '720' }}
         run: python bot.py
