@@ -180,7 +180,7 @@ def upload_to_release(file_path, tag):
     if create.returncode != 0:
         raise RuntimeError(f"gh release create failed: {create.stderr[-500:]}")
 
-    for _ in range(5):
+    for attempt in range(10):
         view = subprocess.run(
             ["gh", "release", "view", tag, "--json", "assets", "-q", ".assets[0].browser_download_url"],
             capture_output=True, text=True,
@@ -188,9 +188,10 @@ def upload_to_release(file_path, tag):
         link = view.stdout.strip()
         if link and link != "null":
             return link
-        time.sleep(2)
+        print(f"attempt {attempt}: view.returncode={view.returncode} stdout={link!r} stderr={view.stderr!r}")
+        time.sleep(3)
 
-    return f"https://github.com/{REPO}/releases/download/{tag}/{quote(file_path)}"
+    raise RuntimeError("could not retrieve the uploaded asset URL from GitHub after several attempts")
 
 
 def edit_message(message_id, text):
