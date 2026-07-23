@@ -199,18 +199,10 @@ def upload_to_release(file_path, tag):
     if create.returncode != 0:
         raise RuntimeError(f"gh release create failed: {create.stderr[-500:]}")
 
-    for attempt in range(10):
-        view = subprocess.run(
-            ["gh", "release", "view", tag, "--json", "assets", "-q", ".assets[0].browser_download_url"],
-            capture_output=True, text=True,
-        )
-        link = view.stdout.strip()
-        if link and link != "null":
-            return link
-        print(f"attempt {attempt}: view.returncode={view.returncode} stdout={link!r} stderr={view.stderr!r}")
-        time.sleep(3)
-
-    raise RuntimeError("could not retrieve the uploaded asset URL from GitHub after several attempts")
+    # file_path is guaranteed ASCII-safe (see ascii_safe_name), so GitHub
+    # will never rename it and we can build the link directly — no need
+    # to round-trip through `gh release view`.
+    return f"https://github.com/{REPO}/releases/download/{tag}/{file_path}"
 
 
 def download_and_send(url, cookies_file, fmt, status_message_id=None, label=None):
