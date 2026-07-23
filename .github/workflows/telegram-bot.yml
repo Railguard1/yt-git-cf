@@ -26,16 +26,18 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+    services:
+      bgutil-pot:
+        image: brainicism/bgutil-ytdlp-pot-provider
+        ports:
+          - 4416:4416
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+          cache: "pip"
 
       - uses: denoland/setup-deno@v2
         with:
@@ -44,21 +46,12 @@ jobs:
       - name: Install yt-dlp and PO token plugin
         run: pip install -U -r requirements.txt bgutil-ytdlp-pot-provider
 
-      - name: Start PO token server
+      - name: Ensure ffmpeg is available
         run: |
-          git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil
-          cd /tmp/bgutil/server
-          npm install
-          npx tsc
-          nohup node build/main.js > /tmp/bgutil.log 2>&1 &
-          for i in $(seq 1 20); do
-            if curl -s http://127.0.0.1:4416/ping > /dev/null; then
-              echo "PO token server is up"
-              break
-            fi
-            sleep 1
-          done
-          cat /tmp/bgutil.log || true
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version | head -n1
 
       - name: Run bot
         env:
