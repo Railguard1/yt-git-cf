@@ -1,38 +1,70 @@
-name: Telegram YouTube Downloader
+import os
+import time
+import base64
+import subprocess
+import requests
 
-on:
-  repository_dispatch:
-    types: [yt_download]
-  workflow_dispatch:
-    inputs:
-      url:
-        description: "YouTube URL"
-        required: true
-      chat_id:
-        description: "Telegram chat id"
-        required: true
+BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+REPO = os.environ["GITHUB_REPOSITORY"]
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-permissions:
-  contents: write
+URL = os.environ["VIDEO_URL"]
+CHAT_ID = os.environ["CHAT_ID"]
 
-jobs:
-  download:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+def send_message(text):
+    requests.post(f"{API}/sendMessage", json={"chat_id": CHAT_ID, "text": text})
 
-      - name: Install dependencies
-        run: pip install -U -r requirements.txt
 
-      - name: Run bot
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
-          CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
-        run: python bot.py
+def setup_cookies():
+    b64 = os.environ.get("YTDLP_COOKIES_B64")
+    if not b64:
+        return None
+    with open("cookies.txt", "wb") as f:
+        f.write(base64.b64decode(b64))
+    return "cookies.txt"
+
+
+def download_video(url, cookies_file):
+    out_tmpl = "download.%(ext)s"
+    cmd = [
+        "yt-dlp",
+        "-f", "bestvideo[filesize<1800M]+bestaudio/best[filesize<1800M]/best",
+        "--merge-output-format", "mp4",
+        "--extractor-args", "youtube:player_client=android,ios",
+        "--no-playlist",
+        "-o", out_tmpl,
+        url,
+    ]
+    if cookies_file:
+        cmd += ["--cookies", cookies_file]
+    subprocess.run(cmd, check=True)
+    for f in os.listdir("."):
+        if f.startswith("download."):
+            return f
+    raise FileNotFoundError("downloaded file not found")
+
+
+def upload_to_release(file_path, tag):
+    subprocess.run(
+        ["gh", "release", "create", tag, file_path, "--title", tag, "--notes", "auto upload"],
+        check=True,
+    )
+    filename = os.path.basename(file_path)
+    return f"https://github.com/{REPO}/releases/download/{tag}/{filename}"
+
+
+def main():
+    cookies_file = setup_cookies()
+    try:
+        file_path = download_video(URL, cookies_file)
+        tag = f"vid-{int(time.time())}"
+        link = upload_to_release(file_path, tag)
+        send_message(f"دانلود شد ✅\n{link}")
+        os.remove(file_path)
+    except Exception as e:
+        send_message(f"خطا در دانلود: {e}")
+
+
+if __name__ == "__main__":
+    main()
