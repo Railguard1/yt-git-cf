@@ -62,4 +62,5 @@ jobs:
           VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
           CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
           FORMAT: ${{ github.event.client_payload.format || github.event.inputs.format || '720' }}
+          STATUS_MESSAGE_ID: ${{ github.event.client_payload.status_message_id }}
         run: python bot.py
