@@ -25,16 +25,26 @@ def send_message(text, reply_markup=None):
 def setup_cookies():
     b64 = os.environ.get("YTDLP_COOKIES_B64")
     if not b64:
+        print("YTDLP_COOKIES_B64 secret is empty or not set")
         return None
     with open("cookies.txt", "wb") as f:
         f.write(base64.b64decode(b64))
+    size = os.path.getsize("cookies.txt")
+    with open("cookies.txt", "r", errors="ignore") as f:
+        first_line = f.readline().strip()
+    print(f"cookies.txt written: {size} bytes, first line: {first_line!r}")
+    if size == 0:
+        return None
     return "cookies.txt"
 
 
 def client_args(cookies_file):
     if cookies_file:
-        return ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb,tv"]
-    return ["--extractor-args", "youtube:player_client=android,ios,tv"]
+        args = ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb,tv"]
+    else:
+        args = ["--extractor-args", "youtube:player_client=android,ios,tv"]
+    print(f"client_args: {args}")
+    return args
 
 
 def list_formats(url, cookies_file):
