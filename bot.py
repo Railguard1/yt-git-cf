@@ -5,7 +5,6 @@ import time
 import base64
 import subprocess
 import requests
-from urllib.parse import quote
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 REPO = os.environ["GITHUB_REPOSITORY"]
@@ -15,6 +14,8 @@ MODE = os.environ.get("MODE", "download")
 URL = os.environ["VIDEO_URL"]
 CHAT_ID = os.environ["CHAT_ID"]
 FORMAT = os.environ.get("FORMAT", "720")
+
+MAX_PLAYLIST_ITEMS = 20
 
 
 def send_message(text, reply_markup=None):
@@ -30,7 +31,6 @@ def send_photo(photo_url, caption, reply_markup=None):
         payload["reply_markup"] = reply_markup
     resp = requests.post(f"{API}/sendPhoto", json=payload)
     if not resp.ok:
-        # fall back to a plain text message if the thumbnail fails to send
         send_message(caption, reply_markup)
 
 
@@ -42,9 +42,6 @@ def setup_cookies():
     with open("cookies.txt", "wb") as f:
         f.write(base64.b64decode(b64))
     size = os.path.getsize("cookies.txt")
-    with open("cookies.txt", "r", errors="ignore") as f:
-        first_line = f.readline().strip()
-    print(f"cookies.txt written: {size} bytes, first line: {first_line!r}")
     if size == 0:
         return None
     return "cookies.txt"
@@ -52,18 +49,22 @@ def setup_cookies():
 
 def client_args(cookies_file):
     if cookies_file:
-        args = ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb,tv"]
-    else:
-        args = ["--extractor-args", "youtube:player_client=android,ios,tv"]
-    print(f"client_args: {args}")
-    return args
+        return ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb,tv"]
+    return ["--extractor-args", "youtube:player_client=android,ios,tv"]
+
+
+def is_playlist_url(url):
+    return "playlist?list=" in url or ("list=" in url and "watch?v=" not in url)
 
 
 def list_formats(url, cookies_file):
-    cmd = ["yt-dlp", "-v", "-J", "--no-warnings", "--no-playlist"] + client_args(cookies_file) + [url]
+    if is_playlist_url(url):
+        list_playlist_formats(url, cookies_file)
+        return
+
+    cmd = ["yt-dlp", "-J", "--no-warnings", "--no-playlist"] + client_args(cookies_file) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    print("---- STDERR (full) ----")
-    print(result.stderr)
+    print(result.stderr[-3000:])
     if result.returncode != 0:
         raise RuntimeError(result.stderr[-800:] or result.stdout[-800:])
 
@@ -97,6 +98,37 @@ def list_formats(url, cookies_file):
         send_message(caption, reply_markup)
 
 
+def list_playlist_formats(url, cookies_file):
+    cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies_file) + [url]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print(result.stderr[-3000:])
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-800:] or result.stdout[-800:])
+
+    info = json.loads(result.stdout)
+    entries = [e for e in info.get("entries", []) if e.get("id")]
+    title = info.get("title", "پلی‌لیست")
+    count = len(entries)
+
+    match = re.search(r"[?&]list=([\w-]+)", url)
+    list_id = match.group(1) if match else info.get("id")
+
+    if count == 0 or not list_id:
+        send_message("هیچ ویدیویی در این پلی‌لیست پیدا نشد.")
+        return
+
+    note = f" (فقط {MAX_PLAYLIST_ITEMS} تای اول دانلود می‌شه)" if count > MAX_PLAYLIST_ITEMS else ""
+    tiers = [1080, 720, 480, 360]
+    buttons = [[{"text": f"{h}p", "callback_data": f"L:{list_id}|{h}"}] for h in tiers]
+    buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"L:{list_id}|audio"}])
+
+    send_message(
+        f"«{title}»\n{count} ویدیو در این پلی‌لیست پیدا شد{note}.\n"
+        f"یک کیفیت انتخاب کن، برای همه ویدیوها همون اعمال می‌شه:",
+        {"inline_keyboard": buttons},
+    )
+
+
 def build_selector(fmt):
     if fmt == "audio":
         return "bestaudio/best"
@@ -104,8 +136,6 @@ def build_selector(fmt):
 
 
 def sanitize_for_url(filename):
-    # keep the real filename for the local file / gh upload, just avoid
-    # spaces so the constructed download link stays clean
     return filename.replace(" ", "_")
 
 
@@ -118,8 +148,8 @@ def download_video(url, cookies_file, fmt):
     cmd.append(url)
 
     result = subprocess.run(cmd, capture_output=True, text=True)
-    print(result.stdout[-2000:])
-    print(result.stderr[-2000:])
+    print(result.stdout[-1500:])
+    print(result.stderr[-1500:])
     if result.returncode != 0:
         raise RuntimeError(result.stderr[-800:] or result.stdout[-800:])
 
@@ -130,20 +160,63 @@ def download_video(url, cookies_file, fmt):
     ]
     if not new_files:
         raise FileNotFoundError("downloaded file not found")
-    return new_files[0]
+
+    file_path = new_files[0]
+    clean_path = sanitize_for_url(file_path)
+    if clean_path != file_path:
+        os.rename(file_path, clean_path)
+    return clean_path
 
 
 def upload_to_release(file_path, tag):
-    clean_name = sanitize_for_url(file_path)
-    if clean_name != file_path:
-        os.rename(file_path, clean_name)
-        file_path = clean_name
-
     subprocess.run(
         ["gh", "release", "create", tag, file_path, "--title", tag, "--notes", "auto upload"],
         check=True,
     )
-    return f"https://github.com/{REPO}/releases/download/{tag}/{quote(file_path)}"
+    result = subprocess.run(
+        ["gh", "release", "view", tag, "--json", "assets", "-q", ".assets[0].browser_download_url"],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
+
+
+def download_and_send(url, cookies_file, fmt, label=None):
+    file_path = download_video(url, cookies_file, fmt)
+    tag = f"vid-{int(time.time())}-{os.getpid()}"
+    link = upload_to_release(file_path, tag)
+    prefix = f"{label}\n" if label else ""
+    send_message(f"{prefix}دانلود شد ✅\n{link}")
+    os.remove(file_path)
+
+
+def download_playlist(url, cookies_file, fmt):
+    cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies_file) + [url]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        send_message(f"خطا در خواندن پلی‌لیست: {result.stderr[-800:]}")
+        return
+
+    info = json.loads(result.stdout)
+    entries = [e for e in info.get("entries", []) if e.get("id")]
+    total = len(entries)
+    if total == 0:
+        send_message("هیچ ویدیویی در این پلی‌لیست پیدا نشد.")
+        return
+
+    if total > MAX_PLAYLIST_ITEMS:
+        entries = entries[:MAX_PLAYLIST_ITEMS]
+
+    send_message(f"شروع دانلود {len(entries)} ویدیو از پلی‌لیست...")
+    done = 0
+    for i, e in enumerate(entries, 1):
+        video_url = f"https://www.youtube.com/watch?v={e['id']}"
+        try:
+            download_and_send(video_url, cookies_file, fmt, label=f"({i}/{len(entries)})")
+            done += 1
+        except Exception as ex:
+            send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}")
+
+    send_message(f"پایان پلی‌لیست: {done} از {len(entries)} ویدیو با موفقیت دانلود شد.")
 
 
 def main():
@@ -156,12 +229,12 @@ def main():
             send_message(f"خطا در دریافت لیست فرمت‌ها: {e}")
         return
 
+    if is_playlist_url(URL):
+        download_playlist(URL, cookies_file, FORMAT)
+        return
+
     try:
-        file_path = download_video(URL, cookies_file, FORMAT)
-        tag = f"vid-{int(time.time())}"
-        link = upload_to_release(file_path, tag)
-        send_message(f"دانلود شد ✅\n{link}")
-        os.remove(file_path)
+        download_and_send(URL, cookies_file, FORMAT)
     except Exception as e:
         send_message(f"خطا در دانلود: {e}")
 
