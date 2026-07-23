@@ -138,7 +138,11 @@ def build_selector(fmt):
 
 
 def sanitize_for_url(filename):
-    return filename.replace(" ", "_")
+    name, ext = os.path.splitext(filename)
+    name = re.sub(r'[#\\/:*?"<>|]', '_', name)
+    name = re.sub(r'\s+', '_', name)
+    name = re.sub(r'_+', '_', name).strip('_')
+    return f"{name}{ext}"
 
 
 def download_video(url, cookies_file, fmt):
