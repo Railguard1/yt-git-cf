@@ -1,9 +1,11 @@
 import os
+import re
 import json
 import time
 import base64
 import subprocess
 import requests
+from urllib.parse import quote
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 REPO = os.environ["GITHUB_REPOSITORY"]
@@ -20,6 +22,16 @@ def send_message(text, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
     requests.post(f"{API}/sendMessage", json=payload)
+
+
+def send_photo(photo_url, caption, reply_markup=None):
+    payload = {"chat_id": CHAT_ID, "photo": photo_url, "caption": caption}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    resp = requests.post(f"{API}/sendPhoto", json=payload)
+    if not resp.ok:
+        # fall back to a plain text message if the thumbnail fails to send
+        send_message(caption, reply_markup)
 
 
 def setup_cookies():
@@ -50,8 +62,6 @@ def client_args(cookies_file):
 def list_formats(url, cookies_file):
     cmd = ["yt-dlp", "-v", "-J", "--no-warnings", "--no-playlist"] + client_args(cookies_file) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    print("---- STDOUT ----")
-    print(result.stdout[:1500])
     print("---- STDERR (full) ----")
     print(result.stderr)
     if result.returncode != 0:
@@ -60,6 +70,7 @@ def list_formats(url, cookies_file):
     info = json.loads(result.stdout)
     video_id = info.get("id")
     title = info.get("title", "ویدیو")
+    thumbnail = info.get("thumbnail")
 
     heights = sorted({f.get("height") for f in info.get("formats", []) if f.get("height")}, reverse=True)
     max_h = heights[0] if heights else None
@@ -77,18 +88,30 @@ def list_formats(url, cookies_file):
         send_message("هیچ فرمت قابل دانلودی برای این ویدیو پیدا نشد.")
         return
 
-    send_message(f"«{title}»\nکیفیت مورد نظر رو انتخاب کن:", {"inline_keyboard": buttons})
+    caption = f"«{title}»\nکیفیت مورد نظر رو انتخاب کن:"
+    reply_markup = {"inline_keyboard": buttons}
+
+    if thumbnail:
+        send_photo(thumbnail, caption[:1024], reply_markup)
+    else:
+        send_message(caption, reply_markup)
 
 
 def build_selector(fmt):
     if fmt == "audio":
         return "bestaudio/best"
-    return f"bestvideo[height<={fmt}]+bestaudio/best[height<={fmt}]/best[height<={fmt}]"
+    return f"bv*[height<={fmt}]+ba/b[height<={fmt}]"
+
+
+def sanitize_for_url(filename):
+    # keep the real filename for the local file / gh upload, just avoid
+    # spaces so the constructed download link stays clean
+    return filename.replace(" ", "_")
 
 
 def download_video(url, cookies_file, fmt):
-    out_tmpl = "download.%(ext)s"
-    cmd = ["yt-dlp", "-f", build_selector(fmt), "--no-playlist", "-o", out_tmpl]
+    before = set(os.listdir("."))
+    cmd = ["yt-dlp", "-f", build_selector(fmt), "--no-playlist", "-o", "%(title)s.%(ext)s"]
     if fmt != "audio":
         cmd += ["--merge-output-format", "mp4"]
     cmd += client_args(cookies_file)
@@ -100,19 +123,27 @@ def download_video(url, cookies_file, fmt):
     if result.returncode != 0:
         raise RuntimeError(result.stderr[-800:] or result.stdout[-800:])
 
-    for f in os.listdir("."):
-        if f.startswith("download."):
-            return f
-    raise FileNotFoundError("downloaded file not found")
+    after = set(os.listdir("."))
+    new_files = [
+        f for f in (after - before)
+        if not f.endswith((".part", ".ytdl", ".tmp")) and f != "cookies.txt"
+    ]
+    if not new_files:
+        raise FileNotFoundError("downloaded file not found")
+    return new_files[0]
 
 
 def upload_to_release(file_path, tag):
+    clean_name = sanitize_for_url(file_path)
+    if clean_name != file_path:
+        os.rename(file_path, clean_name)
+        file_path = clean_name
+
     subprocess.run(
         ["gh", "release", "create", tag, file_path, "--title", tag, "--notes", "auto upload"],
         check=True,
     )
-    filename = os.path.basename(file_path)
-    return f"https://github.com/{REPO}/releases/download/{tag}/{filename}"
+    return f"https://github.com/{REPO}/releases/download/{tag}/{quote(file_path)}"
 
 
 def main():
