@@ -31,13 +31,14 @@ def download_video(url, cookies_file):
         "yt-dlp",
         "-f", "bestvideo[filesize<1800M]+bestaudio/best[filesize<1800M]/best",
         "--merge-output-format", "mp4",
-        "--extractor-args", "youtube:player_client=android,ios",
         "--no-playlist",
         "-o", out_tmpl,
         url,
     ]
     if cookies_file:
-        cmd += ["--cookies", cookies_file]
+        cmd += ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb"]
+    else:
+        cmd += ["--extractor-args", "youtube:player_client=android,ios"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout)
     print(result.stderr)
