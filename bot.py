@@ -168,6 +168,8 @@ def ascii_safe_name(filename):
     name = re.sub(r"_+", "_", name).strip("_.")
     if not name:
         name = "video"
+    if not name[0].isalnum():
+        name = f"v_{name}"
     return f"{name}{ext}"
 
 
