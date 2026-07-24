@@ -2,7 +2,7 @@ name: Telegram YouTube Downloader
 
 on:
   repository_dispatch:
-    types: [yt_list_formats, yt_download]
+    types: [yt_list_formats, yt_playlist_range, yt_download]
   workflow_dispatch:
     inputs:
       mode:
@@ -58,9 +58,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODE: ${{ github.event.action == 'yt_list_formats' && 'list' || (github.event.inputs.mode || 'download') }}
+          MODE: ${{ (github.event.action == 'yt_list_formats' && 'list') || (github.event.action == 'yt_playlist_range' && 'playlist_range') || (github.event.inputs.mode || 'download') }}
           VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
           CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
           FORMAT: ${{ github.event.client_payload.format || github.event.inputs.format || '720' }}
           STATUS_MESSAGE_ID: ${{ github.event.client_payload.status_message_id }}
+          LIST_ID: ${{ github.event.client_payload.list_id }}
+          RANGE_START: ${{ github.event.client_payload.range_start }}
+          RANGE_END: ${{ github.event.client_payload.range_end }}
         run: python bot.py
