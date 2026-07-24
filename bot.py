@@ -12,11 +12,14 @@ REPO = os.environ["GITHUB_REPOSITORY"]
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 MODE = os.environ.get("MODE", "download")
-URL = os.environ["VIDEO_URL"]
+URL = os.environ.get("VIDEO_URL", "")
 CHAT_ID = os.environ["CHAT_ID"]
 FORMAT = os.environ.get("FORMAT", "720")
 
 STATUS_MESSAGE_ID = os.environ.get("STATUS_MESSAGE_ID") or None
+RANGE_START = os.environ.get("RANGE_START") or None
+RANGE_END = os.environ.get("RANGE_END") or None
+LIST_ID = os.environ.get("LIST_ID") or None
 MAX_PLAYLIST_ITEMS = 20
 
 
@@ -127,16 +130,26 @@ def list_playlist_formats(url, cookies_file):
         send_message("هیچ ویدیویی در این پلی‌لیست پیدا نشد.")
         return
 
-    note = f" (فقط {MAX_PLAYLIST_ITEMS} تای اول دانلود می‌شه)" if count > MAX_PLAYLIST_ITEMS else ""
-    tiers = [1080, 720, 480, 360]
-    buttons = [[{"text": f"{h}p", "callback_data": f"L:{list_id}|{h}"}] for h in tiers]
-    buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"L:{list_id}|audio"}])
+    display_count = min(count, 60)
+    lines = [f"{i}. {e.get('title') or e.get('id')}" for i, e in enumerate(entries[:display_count], 1)]
+    listing = "\n".join(lines)
+    if count > display_count:
+        listing += f"\n... و {count - display_count} مورد دیگر"
 
+    send_message(f"«{title}» — {count} ویدیو:\n\n{listing}")
     send_message(
-        f"«{title}»\n{count} ویدیو در این پلی‌لیست پیدا شد{note}.\n"
-        f"یک کیفیت انتخاب کن، برای همه ویدیوها همون اعمال می‌شه:",
-        {"inline_keyboard": buttons},
+        f"از قسمت چند تا چند رو می‌خوای دانلود کنم؟ (مثلاً 1-10)\n"
+        f"روی همین پیام ریپلای کن و بازه رو بنویس.\n\n"
+        f"list_id:{list_id} total:{count}",
+        {"force_reply": True},
     )
+
+
+def playlist_range_quality(list_id, start, end):
+    tiers = [1080, 720, 480, 360]
+    buttons = [[{"text": f"{h}p", "callback_data": f"L:{list_id}:{start}:{end}|{h}"}] for h in tiers]
+    buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"L:{list_id}:{start}:{end}|audio"}])
+    send_message(f"قسمت‌های {start} تا {end} — کیفیت رو انتخاب کن:", {"inline_keyboard": buttons})
 
 
 def build_selector(fmt):
@@ -214,7 +227,7 @@ def download_and_send(url, cookies_file, fmt, status_message_id=None, label=None
     os.remove(file_path)
 
 
-def download_playlist(url, cookies_file, fmt, status_message_id=None):
+def download_playlist(url, cookies_file, fmt, status_message_id=None, range_start=None, range_end=None):
     cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies_file) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -223,12 +236,19 @@ def download_playlist(url, cookies_file, fmt, status_message_id=None):
 
     info = json.loads(result.stdout)
     entries = [e for e in info.get("entries", []) if e.get("id")]
-    total = len(entries)
-    if total == 0:
+    if not entries:
         edit_message(status_message_id, "هیچ ویدیویی در این پلی‌لیست پیدا نشد.")
         return
 
-    if total > MAX_PLAYLIST_ITEMS:
+    if range_start and range_end:
+        try:
+            s, e_ = int(range_start), int(range_end)
+            entries = entries[max(s - 1, 0):e_]
+        except ValueError:
+            pass
+
+    truncated = len(entries) > MAX_PLAYLIST_ITEMS
+    if truncated:
         entries = entries[:MAX_PLAYLIST_ITEMS]
 
     done = 0
@@ -245,7 +265,7 @@ def download_playlist(url, cookies_file, fmt, status_message_id=None):
         except Exception as ex:
             send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}")
 
-    edit_message(status_message_id, f"پایان پلی‌لیست: {done} از {len(entries)} ویدیو با موفقیت دانلود شد. ✅")
+    edit_message(status_message_id, f"پایان: {done} از {len(entries)} ویدیو با موفقیت دانلود شد.{' (بازه محدود به ' + str(MAX_PLAYLIST_ITEMS) + ' ویدیو شد)' if truncated else ''} ✅")
 
 
 def main():
@@ -258,8 +278,12 @@ def main():
             send_message(f"خطا در دریافت لیست فرمت‌ها: {e}")
         return
 
+    if MODE == "playlist_range":
+        playlist_range_quality(LIST_ID, RANGE_START, RANGE_END)
+        return
+
     if is_playlist_url(URL):
-        download_playlist(URL, cookies_file, FORMAT, STATUS_MESSAGE_ID)
+        download_playlist(URL, cookies_file, FORMAT, STATUS_MESSAGE_ID, RANGE_START, RANGE_END)
         return
 
     try:
