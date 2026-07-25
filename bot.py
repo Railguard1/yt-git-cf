@@ -256,7 +256,7 @@ TARGET_PART_SIZE = 1800 * 1024 * 1024  # leave some margin under the limit
 def get_duration(file_path):
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrapper=1:nokey=1", file_path],
+         "-of", "default=noprint_wrappers=1:nokey=1", file_path],
         capture_output=True, text=True,
     )
     print(f"ffprobe stdout={result.stdout!r} stderr={result.stderr!r} returncode={result.returncode}")
