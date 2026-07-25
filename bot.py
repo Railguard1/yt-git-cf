@@ -259,7 +259,11 @@ def get_duration(file_path):
          "-of", "default=noprint_wrapper=1:nokey=1", file_path],
         capture_output=True, text=True,
     )
-    return float(result.stdout.strip())
+    print(f"ffprobe stdout={result.stdout!r} stderr={result.stderr!r} returncode={result.returncode}")
+    duration = result.stdout.strip()
+    if result.returncode != 0 or not duration:
+        raise RuntimeError(f"ffprobe failed to read duration: {result.stderr[-500:] or 'no output'}")
+    return float(duration)
 
 
 def split_video(file_path):
