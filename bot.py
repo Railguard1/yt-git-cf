@@ -21,6 +21,7 @@ RANGE_START = os.environ.get("RANGE_START") or None
 RANGE_END = os.environ.get("RANGE_END") or None
 LIST_ID = os.environ.get("LIST_ID") or None
 MAX_PLAYLIST_ITEMS = 20
+QUALITY_TIERS = [1080, 720, 480, 360, 240]
 
 
 def send_message(text, reply_markup=None):
@@ -204,6 +205,19 @@ def download_video(url, cookies_file, fmt):
     return safe_name, title
 
 
+def download_video_with_retry(url, cookies_file, fmt, retries=2, delay=5):
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return download_video(url, cookies_file, fmt)
+        except Exception as e:
+            last_err = e
+            print(f"download attempt {attempt + 1}/{retries} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+    raise last_err
+
+
 def upload_to_release(file_path, tag):
     create = subprocess.run(
         ["gh", "release", "create", tag, file_path, "--title", tag, "--notes", "auto upload"],
@@ -220,13 +234,43 @@ def upload_to_release(file_path, tag):
     return f"https://github.com/{REPO}/releases/download/{tag}/{file_path}"
 
 
+def fetch_and_upload(url, cookies_file, fmt):
+    """Downloads + uploads a single video. Retries transient network
+    errors, and if the file is too big for GitHub's 2GB asset limit,
+    automatically retries at a lower quality. Returns (title, link, note)."""
+    if fmt in QUALITY_TIERS:
+        candidates = QUALITY_TIERS[QUALITY_TIERS.index(fmt):]
+    else:
+        candidates = [fmt]
+
+    last_err = None
+    for i, candidate in enumerate(candidates):
+        try:
+            file_path, title = download_video_with_retry(url, cookies_file, candidate)
+        except Exception as e:
+            last_err = e
+            continue
+
+        try:
+            tag = f"vid-{int(time.time())}-{os.getpid()}-{i}"
+            link = upload_to_release(file_path, tag)
+            os.remove(file_path)
+            note = f" (کیفیت به {candidate}p کاهش یافت چون حجم فایل بیشتر از سقف ۲ گیگ گیت‌هاب بود)" if candidate != fmt else ""
+            return title, link, note
+        except Exception as e:
+            os.remove(file_path)
+            last_err = e
+            if "must be less than" in str(e) and i < len(candidates) - 1:
+                continue
+            raise last_err
+
+    raise last_err or RuntimeError("download failed")
+
+
 def download_and_send(url, cookies_file, fmt, status_message_id=None, label=None):
-    file_path, title = download_video(url, cookies_file, fmt)
-    tag = f"vid-{int(time.time())}-{os.getpid()}"
-    link = upload_to_release(file_path, tag)
-    edit_message(status_message_id, f"{label + ' ' if label else ''}دانلود تمام شد ✅")
+    title, link, note = fetch_and_upload(url, cookies_file, fmt)
+    edit_message(status_message_id, f"{label + ' ' if label else ''}دانلود تمام شد ✅{note}")
     send_message(f"{title}\n{link}")
-    os.remove(file_path)
 
 
 def download_playlist(url, cookies_file, fmt, status_message_id=None, range_start=None, range_end=None):
@@ -258,14 +302,12 @@ def download_playlist(url, cookies_file, fmt, status_message_id=None, range_star
         edit_message(status_message_id, f"در حال دانلود ({i}/{len(entries)})... ⏳")
         video_url = f"https://www.youtube.com/watch?v={e['id']}"
         try:
-            file_path, title = download_video(video_url, cookies_file, fmt)
-            tag = f"vid-{int(time.time())}-{i}"
-            link = upload_to_release(file_path, tag)
-            send_message(f"✅ ({i}/{len(entries)}) {title}\n{link}")
-            os.remove(file_path)
+            title, link, note = fetch_and_upload(video_url, cookies_file, fmt)
+            send_message(f"✅ ({i}/{len(entries)}) {title}{note}\n{link}")
             done += 1
         except Exception as ex:
             send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}")
+        time.sleep(3)
 
     edit_message(status_message_id, f"پایان: {done} از {len(entries)} ویدیو با موفقیت دانلود شد.{' (بازه محدود به ' + str(MAX_PLAYLIST_ITEMS) + ' ویدیو شد)' if truncated else ''} ✅")
 
