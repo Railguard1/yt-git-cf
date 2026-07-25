@@ -2,6 +2,8 @@ import os
 import re
 import json
 import time
+import math
+import glob
 import base64
 import unicodedata
 import subprocess
@@ -21,7 +23,6 @@ RANGE_START = os.environ.get("RANGE_START") or None
 RANGE_END = os.environ.get("RANGE_END") or None
 LIST_ID = os.environ.get("LIST_ID") or None
 MAX_PLAYLIST_ITEMS = 20
-QUALITY_TIERS = [1080, 720, 480, 360, 240]
 
 
 def send_message(text, reply_markup=None):
@@ -49,19 +50,30 @@ def edit_message(message_id, text):
 
 
 def setup_cookies():
-    b64 = os.environ.get("YTDLP_COOKIES_B64")
-    if not b64:
-        print("YTDLP_COOKIES_B64 secret is empty or not set")
-        return None
-    with open("cookies.txt", "wb") as f:
-        f.write(base64.b64decode(b64))
-    size = os.path.getsize("cookies.txt")
-    if size == 0:
-        return None
-    return "cookies.txt"
+    cookies = {}
+    for platform, env_name, filename in [
+        ("youtube", "YTDLP_COOKIES_B64", "cookies_youtube.txt"),
+        ("instagram", "IG_COOKIES_B64", "cookies_instagram.txt"),
+    ]:
+        b64 = os.environ.get(env_name)
+        if not b64:
+            cookies[platform] = None
+            continue
+        with open(filename, "wb") as f:
+            f.write(base64.b64decode(b64))
+        cookies[platform] = filename if os.path.getsize(filename) > 0 else None
+    return cookies
 
 
-def client_args(cookies_file):
+def platform_of(url):
+    return "instagram" if "instagram.com" in url else "youtube"
+
+
+def client_args(cookies, url):
+    platform = platform_of(url)
+    cookies_file = cookies.get(platform)
+    if platform == "instagram":
+        return ["--cookies", cookies_file] if cookies_file else []
     if cookies_file:
         return ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb,tv"]
     return ["--extractor-args", "youtube:player_client=android,ios,tv"]
@@ -71,12 +83,12 @@ def is_playlist_url(url):
     return "playlist?list=" in url or ("list=" in url and "watch?v=" not in url)
 
 
-def list_formats(url, cookies_file):
+def list_formats(url, cookies):
     if is_playlist_url(url):
-        list_playlist_formats(url, cookies_file)
+        list_playlist_formats(url, cookies)
         return
 
-    cmd = ["yt-dlp", "-J", "--no-warnings", "--no-playlist"] + client_args(cookies_file) + [url]
+    cmd = ["yt-dlp", "-J", "--no-warnings", "--no-playlist"] + client_args(cookies, url) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stderr[-3000:])
     if result.returncode != 0:
@@ -100,8 +112,9 @@ def list_formats(url, cookies_file):
         buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"{video_id}|audio"}])
 
     if not buttons:
-        send_message("هیچ فرمت قابل دانلودی برای این ویدیو پیدا نشد.")
-        return
+        # e.g. an Instagram photo post, or a single-format post with no
+        # height metadata — just offer a plain download button
+        buttons = [[{"text": "دانلود 📥", "callback_data": f"{video_id}|best"}]]
 
     caption = f"«{title}»\nکیفیت مورد نظر رو انتخاب کن:"
     reply_markup = {"inline_keyboard": buttons}
@@ -112,8 +125,8 @@ def list_formats(url, cookies_file):
         send_message(caption, reply_markup)
 
 
-def list_playlist_formats(url, cookies_file):
-    cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies_file) + [url]
+def list_playlist_formats(url, cookies):
+    cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies, url) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stderr[-3000:])
     if result.returncode != 0:
@@ -156,6 +169,8 @@ def playlist_range_quality(list_id, start, end):
 def build_selector(fmt):
     if fmt == "audio":
         return "bestaudio/best"
+    if fmt == "best":
+        return "best"
     return f"bv*[height<={fmt}]+ba/b[height<={fmt}]"
 
 
@@ -174,13 +189,13 @@ def ascii_safe_name(filename):
     return f"{name}{ext}"
 
 
-def download_video(url, cookies_file, fmt):
+def download_video(url, cookies, fmt):
     """Downloads the video and returns (safe_filename, display_title)."""
     before = set(os.listdir("."))
     cmd = ["yt-dlp", "-f", build_selector(fmt), "--no-playlist", "-o", "%(title)s.%(ext)s"]
-    if fmt != "audio":
+    if fmt not in ("audio", "best"):
         cmd += ["--merge-output-format", "mp4"]
-    cmd += client_args(cookies_file)
+    cmd += client_args(cookies, url)
     cmd.append(url)
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -205,11 +220,11 @@ def download_video(url, cookies_file, fmt):
     return safe_name, title
 
 
-def download_video_with_retry(url, cookies_file, fmt, retries=2, delay=5):
+def download_video_with_retry(url, cookies, fmt, retries=2, delay=5):
     last_err = None
     for attempt in range(retries):
         try:
-            return download_video(url, cookies_file, fmt)
+            return download_video(url, cookies, fmt)
         except Exception as e:
             last_err = e
             print(f"download attempt {attempt + 1}/{retries} failed: {e}")
@@ -234,47 +249,98 @@ def upload_to_release(file_path, tag):
     return f"https://github.com/{REPO}/releases/download/{tag}/{file_path}"
 
 
-def fetch_and_upload(url, cookies_file, fmt):
-    """Downloads + uploads a single video. Retries transient network
-    errors, and if the file is too big for GitHub's 2GB asset limit,
-    automatically retries at a lower quality. Returns (title, link, note)."""
-    if fmt in QUALITY_TIERS:
-        candidates = QUALITY_TIERS[QUALITY_TIERS.index(fmt):]
-    else:
-        candidates = [fmt]
+GITHUB_ASSET_LIMIT = 2 * 1024 * 1024 * 1024  # 2GiB (GitHub's hard limit)
+TARGET_PART_SIZE = 1800 * 1024 * 1024  # leave some margin under the limit
 
-    last_err = None
-    for i, candidate in enumerate(candidates):
-        try:
-            file_path, title = download_video_with_retry(url, cookies_file, candidate)
-        except Exception as e:
-            last_err = e
-            continue
 
-        try:
-            tag = f"vid-{int(time.time())}-{os.getpid()}-{i}"
-            link = upload_to_release(file_path, tag)
+def get_duration(file_path):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrapper=1:nokey=1", file_path],
+        capture_output=True, text=True,
+    )
+    return float(result.stdout.strip())
+
+
+def split_video(file_path):
+    """Splits file_path into roughly equal parts (no re-encoding, just a
+    stream copy) sized to fit under GitHub's asset limit, and returns the
+    list of part file paths."""
+    size = os.path.getsize(file_path)
+    duration = get_duration(file_path)
+    num_parts = max(2, -(-size // TARGET_PART_SIZE))  # ceil division
+    part_duration = duration / num_parts
+
+    base, ext = os.path.splitext(file_path)
+    pattern = f"{base}_part%02d{ext}"
+    cmd = [
+        "ffmpeg", "-y", "-i", file_path, "-c", "copy", "-map", "0",
+        "-f", "segment", "-segment_time", str(int(part_duration) + 1),
+        "-reset_timestamps", "1", pattern,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print(result.stderr[-1500:])
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg split failed: {result.stderr[-500:]}")
+
+    prefix = f"{os.path.basename(base)}_part"
+    parts = sorted(f for f in os.listdir(os.path.dirname(file_path) or ".") if f.startswith(prefix) and f.endswith(ext))
+    dirpath = os.path.dirname(file_path)
+    return [os.path.join(dirpath, p) if dirpath else p for p in parts]
+
+
+def split_and_upload(file_path, tag_prefix):
+    parts = split_video(file_path)
+    links = []
+    for i, part in enumerate(parts, 1):
+        tag = f"{tag_prefix}-p{i}"
+        links.append(upload_to_release(part, tag))
+        os.remove(part)
+    return links
+
+
+def fetch_and_upload(url, cookies, fmt):
+    """Downloads + uploads a single video at the requested quality
+    (unchanged). If the resulting file is too big for GitHub's 2GB asset
+    limit, splits it into parts (no quality loss, just a stream copy) and
+    uploads each part instead. Returns (title, links, note)."""
+    file_path, title = download_video_with_retry(url, cookies, fmt)
+    tag = f"vid-{int(time.time())}-{os.getpid()}"
+
+    try:
+        link = upload_to_release(file_path, tag)
+        os.remove(file_path)
+        return title, [link], ""
+    except Exception as e:
+        if "must be less than" not in str(e):
             os.remove(file_path)
-            note = f" (کیفیت به {candidate}p کاهش یافت چون حجم فایل بیشتر از سقف ۲ گیگ گیت‌هاب بود)" if candidate != fmt else ""
-            return title, link, note
-        except Exception as e:
+            raise
+        print(f"file too large for a single asset, splitting: {e}")
+
+    try:
+        links = split_and_upload(file_path, tag)
+    finally:
+        if os.path.exists(file_path):
             os.remove(file_path)
-            last_err = e
-            if "must be less than" in str(e) and i < len(candidates) - 1:
-                continue
-            raise last_err
-
-    raise last_err or RuntimeError("download failed")
+    note = f" (فایل به {len(links)} پارت تقسیم شد چون حجمش بیشتر از سقف ۲ گیگ گیت‌هاب بود)"
+    return title, links, note
 
 
-def download_and_send(url, cookies_file, fmt, status_message_id=None, label=None):
-    title, link, note = fetch_and_upload(url, cookies_file, fmt)
+def format_links(title, links):
+    if len(links) == 1:
+        return f"{title}\n{links[0]}"
+    parts_text = "\n".join(f"پارت {i}: {l}" for i, l in enumerate(links, 1))
+    return f"{title}\n{parts_text}"
+
+
+def download_and_send(url, cookies, fmt, status_message_id=None, label=None):
+    title, links, note = fetch_and_upload(url, cookies, fmt)
     edit_message(status_message_id, f"{label + ' ' if label else ''}دانلود تمام شد ✅{note}")
-    send_message(f"{title}\n{link}")
+    send_message(format_links(title, links))
 
 
-def download_playlist(url, cookies_file, fmt, status_message_id=None, range_start=None, range_end=None):
-    cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies_file) + [url]
+def download_playlist(url, cookies, fmt, status_message_id=None, range_start=None, range_end=None):
+    cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies, url) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         edit_message(status_message_id, f"خطا در خواندن پلی‌لیست: {result.stderr[-500:]}")
@@ -302,8 +368,8 @@ def download_playlist(url, cookies_file, fmt, status_message_id=None, range_star
         edit_message(status_message_id, f"در حال دانلود ({i}/{len(entries)})... ⏳")
         video_url = f"https://www.youtube.com/watch?v={e['id']}"
         try:
-            title, link, note = fetch_and_upload(video_url, cookies_file, fmt)
-            send_message(f"✅ ({i}/{len(entries)}) {title}{note}\n{link}")
+            title, links, note = fetch_and_upload(video_url, cookies, fmt)
+            send_message(f"✅ ({i}/{len(entries)}) {note}\n{format_links(title, links)}")
             done += 1
         except Exception as ex:
             send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}")
@@ -313,11 +379,11 @@ def download_playlist(url, cookies_file, fmt, status_message_id=None, range_star
 
 
 def main():
-    cookies_file = setup_cookies()
+    cookies = setup_cookies()
 
     if MODE == "list":
         try:
-            list_formats(URL, cookies_file)
+            list_formats(URL, cookies)
         except Exception as e:
             send_message(f"خطا در دریافت لیست فرمت‌ها: {e}")
         return
@@ -327,11 +393,11 @@ def main():
         return
 
     if is_playlist_url(URL):
-        download_playlist(URL, cookies_file, FORMAT, STATUS_MESSAGE_ID, RANGE_START, RANGE_END)
+        download_playlist(URL, cookies, FORMAT, STATUS_MESSAGE_ID, RANGE_START, RANGE_END)
         return
 
     try:
-        download_and_send(URL, cookies_file, FORMAT, status_message_id=STATUS_MESSAGE_ID)
+        download_and_send(URL, cookies, FORMAT, status_message_id=STATUS_MESSAGE_ID)
     except Exception as e:
         edit_message(STATUS_MESSAGE_ID, f"خطا در دانلود: {e}")
         if not STATUS_MESSAGE_ID:
