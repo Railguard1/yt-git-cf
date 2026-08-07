@@ -222,6 +222,7 @@ def ascii_safe_name(filename):
     name = unicodedata.normalize("NFKD", name)
     name = name.encode("ascii", "ignore").decode("ascii")
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+    name = re.sub(r"\.{2,}", ".", name)  # GitHub collapses repeated dots itself
     name = re.sub(r"_+", "_", name).strip("_.")
     if not name:
         name = "video"
@@ -261,7 +262,11 @@ def download_video(url, cookies, fmt):
     return safe_name, title
 
 
-def download_video_with_retry(url, cookies, fmt, retries=2, delay=5):
+def download_video_with_retry(url, cookies, fmt, retries=None, delay=None):
+    if retries is None:
+        retries = 4 if platform_of(url) == "twitter" else 2
+    if delay is None:
+        delay = 8 if platform_of(url) == "twitter" else 5
     last_err = None
     for attempt in range(retries):
         try:
