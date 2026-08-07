@@ -48,16 +48,18 @@ jobs:
 
       - name: Ensure ffmpeg is available
         run: |
-          if ! command -v ffmpeg >/dev/null; then
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
             sudo apt-get update && sudo apt-get install -y ffmpeg
           fi
           ffmpeg -version | head -n1
+          ffprobe -version | head -n1
 
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
           IG_COOKIES_B64: ${{ secrets.IG_COOKIES_B64 }}
+          TWITTER_COOKIES_B64: ${{ secrets.TWITTER_COOKIES_B64 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODE: ${{ (github.event.action == 'yt_list_formats' && 'list') || (github.event.action == 'yt_playlist_range' && 'playlist_range') || (github.event.inputs.mode || 'download') }}
           VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
@@ -67,4 +69,21 @@ jobs:
           LIST_ID: ${{ github.event.client_payload.list_id }}
           RANGE_START: ${{ github.event.client_payload.range_start }}
           RANGE_END: ${{ github.event.client_payload.range_end }}
+          RAW_CALLBACK_DATA: ${{ github.event.client_payload.raw_callback_data }}
         run: python bot.py
+
+      - name: Commit stats
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for i in 1 2 3 4 5; do
+            git add stats.jsonl 2>/dev/null || true
+            if git diff --cached --quiet; then
+              echo "no stats changes"
+              break
+            fi
+            git commit -m "log stats" && git pull --rebase && git push && break
+            echo "push failed, retrying ($i)..."
+            sleep $((RANDOM % 5 + 1))
+          done
