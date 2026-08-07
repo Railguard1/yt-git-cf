@@ -34,17 +34,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Detect platform
+        id: detect
+        env:
+          VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
+        run: |
+          if [[ -z "$VIDEO_URL" || "$VIDEO_URL" == *"youtube.com"* || "$VIDEO_URL" == *"youtu.be"* ]]; then
+            echo "is_youtube=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_youtube=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
       - uses: denoland/setup-deno@v2
+        if: steps.detect.outputs.is_youtube == 'true'
         with:
           deno-version: v2.x
 
-      - name: Install yt-dlp and PO token plugin
-        run: pip install -U -r requirements.txt bgutil-ytdlp-pot-provider
+      - name: Install yt-dlp
+        run: pip install -U -r requirements.txt
+
+      - name: Install YouTube PO token plugin
+        if: steps.detect.outputs.is_youtube == 'true'
+        run: pip install -U bgutil-ytdlp-pot-provider
 
       - name: Ensure ffmpeg is available
         run: |
