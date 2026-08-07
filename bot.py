@@ -22,6 +22,7 @@ STATUS_MESSAGE_ID = os.environ.get("STATUS_MESSAGE_ID") or None
 RANGE_START = os.environ.get("RANGE_START") or None
 RANGE_END = os.environ.get("RANGE_END") or None
 LIST_ID = os.environ.get("LIST_ID") or None
+RAW_CALLBACK_DATA = os.environ.get("RAW_CALLBACK_DATA") or None
 MAX_PLAYLIST_ITEMS = 20
 
 
@@ -41,12 +42,19 @@ def send_photo(photo_url, caption, reply_markup=None):
         send_message(caption, reply_markup)
 
 
-def edit_message(message_id, text):
+def edit_message(message_id, text, reply_markup=None):
     if not message_id:
         return
-    requests.post(f"{API}/editMessageText", json={
-        "chat_id": CHAT_ID, "message_id": message_id, "text": text,
-    })
+    payload = {"chat_id": CHAT_ID, "message_id": message_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    requests.post(f"{API}/editMessageText", json=payload)
+
+
+def retry_keyboard():
+    if not RAW_CALLBACK_DATA:
+        return None
+    return {"inline_keyboard": [[{"text": "🔄 دوباره امتحان کن", "callback_data": RAW_CALLBACK_DATA}]]}
 
 
 def setup_cookies():
@@ -54,6 +62,7 @@ def setup_cookies():
     for platform, env_name, filename in [
         ("youtube", "YTDLP_COOKIES_B64", "cookies_youtube.txt"),
         ("instagram", "IG_COOKIES_B64", "cookies_instagram.txt"),
+        ("twitter", "TWITTER_COOKIES_B64", "cookies_twitter.txt"),
     ]:
         b64 = os.environ.get(env_name)
         if not b64:
@@ -66,13 +75,17 @@ def setup_cookies():
 
 
 def platform_of(url):
-    return "instagram" if "instagram.com" in url else "youtube"
+    if "instagram.com" in url:
+        return "instagram"
+    if "twitter.com" in url or "x.com" in url:
+        return "twitter"
+    return "youtube"
 
 
 def client_args(cookies, url):
     platform = platform_of(url)
     cookies_file = cookies.get(platform)
-    if platform == "instagram":
+    if platform in ("instagram", "twitter"):
         return ["--cookies", cookies_file] if cookies_file else []
     if cookies_file:
         return ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb,tv"]
@@ -303,17 +316,33 @@ def split_and_upload(file_path, tag_prefix):
     return links
 
 
+def log_stat(title, url, size_mb):
+    try:
+        entry = {
+            "ts": int(time.time()),
+            "title": title,
+            "platform": platform_of(url),
+            "size_mb": round(size_mb, 1),
+        }
+        with open("stats.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"failed to log stat: {e}")
+
+
 def fetch_and_upload(url, cookies, fmt):
     """Downloads + uploads a single video at the requested quality
     (unchanged). If the resulting file is too big for GitHub's 2GB asset
     limit, splits it into parts (no quality loss, just a stream copy) and
     uploads each part instead. Returns (title, links, note)."""
     file_path, title = download_video_with_retry(url, cookies, fmt)
+    size_mb = os.path.getsize(file_path) / (1024 * 1024)
     tag = f"vid-{int(time.time())}-{os.getpid()}"
 
     try:
         link = upload_to_release(file_path, tag)
         os.remove(file_path)
+        log_stat(title, url, size_mb)
         return title, [link], ""
     except Exception as e:
         if "must be less than" not in str(e):
@@ -326,6 +355,7 @@ def fetch_and_upload(url, cookies, fmt):
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
+    log_stat(title, url, size_mb)
     note = f" (فایل به {len(links)} پارت تقسیم شد چون حجمش بیشتر از سقف ۲ گیگ گیت‌هاب بود)"
     return title, links, note
 
@@ -376,7 +406,8 @@ def download_playlist(url, cookies, fmt, status_message_id=None, range_start=Non
             send_message(f"✅ ({i}/{len(entries)}) {note}\n{format_links(title, links)}")
             done += 1
         except Exception as ex:
-            send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}")
+            item_retry = {"inline_keyboard": [[{"text": "🔄 دوباره امتحان کن", "callback_data": f"{e['id']}|{fmt}"}]]}
+            send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}", item_retry)
         time.sleep(3)
 
     edit_message(status_message_id, f"پایان: {done} از {len(entries)} ویدیو با موفقیت دانلود شد.{' (بازه محدود به ' + str(MAX_PLAYLIST_ITEMS) + ' ویدیو شد)' if truncated else ''} ✅")
@@ -403,9 +434,9 @@ def main():
     try:
         download_and_send(URL, cookies, FORMAT, status_message_id=STATUS_MESSAGE_ID)
     except Exception as e:
-        edit_message(STATUS_MESSAGE_ID, f"خطا در دانلود: {e}")
+        edit_message(STATUS_MESSAGE_ID, f"خطا در دانلود: {e}", retry_keyboard())
         if not STATUS_MESSAGE_ID:
-            send_message(f"خطا در دانلود: {e}")
+            send_message(f"خطا در دانلود: {e}", retry_keyboard())
 
 
 if __name__ == "__main__":
