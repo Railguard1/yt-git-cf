@@ -66,11 +66,16 @@ def setup_cookies():
     ]:
         b64 = os.environ.get(env_name)
         if not b64:
+            print(f"[{platform}] {env_name} not set — running without cookies")
             cookies[platform] = None
             continue
         with open(filename, "wb") as f:
             f.write(base64.b64decode(b64))
-        cookies[platform] = filename if os.path.getsize(filename) > 0 else None
+        size = os.path.getsize(filename)
+        with open(filename, "r", errors="ignore") as f:
+            first_line = f.readline().strip()
+        print(f"[{platform}] cookies file: {size} bytes, first line: {first_line!r}")
+        cookies[platform] = filename if size > 0 else None
     return cookies
 
 
@@ -86,14 +91,31 @@ def client_args(cookies, url):
     platform = platform_of(url)
     cookies_file = cookies.get(platform)
     if platform in ("instagram", "twitter"):
-        return ["--cookies", cookies_file] if cookies_file else []
-    if cookies_file:
-        return ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb,tv"]
-    return ["--extractor-args", "youtube:player_client=android,ios,tv"]
+        args = ["--cookies", cookies_file] if cookies_file else []
+    elif cookies_file:
+        args = ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web,mweb,tv"]
+    else:
+        args = ["--extractor-args", "youtube:player_client=android,ios,tv"]
+    print(f"[{platform}] using cookies={bool(cookies_file)} args={args}")
+    return args
 
 
 def is_playlist_url(url):
     return "playlist?list=" in url or ("list=" in url and "watch?v=" not in url)
+
+
+def build_ref(url, video_id):
+    """Builds the short token embedded in callback_data, from which the
+    original URL can be reconstructed later (see worker.js)."""
+    platform = platform_of(url)
+    if platform == "instagram":
+        m = re.search(r"instagram\.com/(p|reel|reels|tv)/([\w-]+)", url)
+        if m:
+            return f"IG:{m.group(1)}:{m.group(2)}"
+        return f"IG:p:{video_id}"
+    if platform == "twitter":
+        return f"TW:{video_id}"
+    return video_id  # youtube — unprefixed, unchanged
 
 
 def list_formats(url, cookies):
@@ -109,6 +131,7 @@ def list_formats(url, cookies):
 
     info = json.loads(result.stdout)
     video_id = info.get("id")
+    ref = build_ref(url, video_id)
     title = info.get("title", "ویدیو")
     thumbnail = info.get("thumbnail")
 
@@ -118,16 +141,16 @@ def list_formats(url, cookies):
     if not tiers and max_h:
         tiers = [max_h]
 
-    buttons = [[{"text": f"{h}p", "callback_data": f"{video_id}|{h}"}] for h in tiers]
+    buttons = [[{"text": f"{h}p", "callback_data": f"{ref}|{h}"}] for h in tiers]
 
     has_audio = any(f.get("vcodec") == "none" for f in info.get("formats", []))
     if has_audio:
-        buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"{video_id}|audio"}])
+        buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"{ref}|audio"}])
 
     if not buttons:
         # e.g. an Instagram photo post, or a single-format post with no
         # height metadata — just offer a plain download button
-        buttons = [[{"text": "دانلود 📥", "callback_data": f"{video_id}|best"}]]
+        buttons = [[{"text": "دانلود 📥", "callback_data": f"{ref}|best"}]]
 
     caption = f"«{title}»\nکیفیت مورد نظر رو انتخاب کن:"
     reply_markup = {"inline_keyboard": buttons}
