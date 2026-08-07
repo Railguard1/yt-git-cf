@@ -148,9 +148,14 @@ def list_formats(url, cookies):
         buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"{ref}|audio"}])
 
     if not buttons:
-        # e.g. an Instagram photo post, or a single-format post with no
-        # height metadata — just offer a plain download button
-        buttons = [[{"text": "دانلود 📥", "callback_data": f"{ref}|best"}]]
+        formats = info.get("formats", [])
+        if formats:
+            # e.g. an Instagram photo post, or a single-format post with
+            # no height metadata — offer a plain download button
+            buttons = [[{"text": "دانلود 📥", "callback_data": f"{ref}|best"}]]
+        else:
+            send_message("این پست هیچ ویدیو یا فایل قابل‌دانلودی نداره (شاید فقط متن/عکسه، یا محتوای اصلی توی یه پست دیگه‌ست که این پست فقط بهش اشاره کرده).")
+            return
 
     caption = f"«{title}»\nکیفیت مورد نظر رو انتخاب کن:"
     reply_markup = {"inline_keyboard": buttons}
