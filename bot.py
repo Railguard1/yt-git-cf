@@ -114,7 +114,13 @@ def build_ref(url, video_id):
             return f"IG:{m.group(1)}:{m.group(2)}"
         return f"IG:p:{video_id}"
     if platform == "twitter":
-        return f"TW:{video_id}"
+        # Use the ID from the URL the user actually sent, not yt-dlp's
+        # resolved info["id"] — for retweets/quote-tweets that can point
+        # to a different underlying tweet, which breaks a standalone
+        # re-fetch at download time.
+        m = re.search(r"status/(\d+)", url)
+        tw_id = m.group(1) if m else video_id
+        return f"TW:{tw_id}"
     return video_id  # youtube — unprefixed, unchanged
 
 
@@ -137,6 +143,21 @@ def list_formats(url, cookies):
     formats = info.get("formats", [])
 
     video_formats = [f for f in formats if f.get("vcodec") not in (None, "none")]
+
+    # Some quote-tweets / embeds come back as a multi-entry result instead
+    # of a flat single-video info dict — fall back to the first entry.
+    if not video_formats and info.get("entries"):
+        entries = [e for e in info["entries"] if e]
+        if entries:
+            first = entries[0]
+            formats = first.get("formats", formats)
+            video_formats = [f for f in formats if f.get("vcodec") not in (None, "none")]
+            thumbnail = first.get("thumbnail") or thumbnail
+            title = first.get("title") or title
+
+    if not video_formats:
+        print(f"no video formats found. top-level keys: {list(info.keys())}")
+        print(f"formats count: {len(formats)}, sample: {formats[:2]}")
 
     heights = sorted({f.get("height") for f in video_formats if f.get("height")}, reverse=True)
     max_h = heights[0] if heights else None
