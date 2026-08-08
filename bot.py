@@ -23,7 +23,9 @@ RANGE_START = os.environ.get("RANGE_START") or None
 RANGE_END = os.environ.get("RANGE_END") or None
 LIST_ID = os.environ.get("LIST_ID") or None
 RAW_CALLBACK_DATA = os.environ.get("RAW_CALLBACK_DATA") or None
+DESTINATION = os.environ.get("DESTINATION") or "github"
 MAX_PLAYLIST_ITEMS = 20
+MAX_TELEGRAM_UPLOAD = 49 * 1024 * 1024  # stay safely under the 50MB bot API limit
 
 
 def send_message(text, reply_markup=None):
@@ -387,20 +389,52 @@ def log_stat(title, url, size_mb):
         print(f"failed to log stat: {e}")
 
 
-def fetch_and_upload(url, cookies, fmt):
-    """Downloads + uploads a single video at the requested quality
-    (unchanged). If the resulting file is too big for GitHub's 2GB asset
-    limit, splits it into parts (no quality loss, just a stream copy) and
-    uploads each part instead. Returns (title, links, note)."""
+def send_file_to_chat(file_path, title, fmt):
+    method = "sendAudio" if fmt == "audio" else "sendVideo"
+    field = "audio" if fmt == "audio" else "video"
+    with open(file_path, "rb") as f:
+        resp = requests.post(
+            f"{API}/{method}",
+            data={"chat_id": CHAT_ID, "caption": title[:1024]},
+            files={field: f},
+            timeout=600,
+        )
+    if not resp.ok:
+        raise RuntimeError(f"telegram upload failed: {resp.status_code} {resp.text[:300]}")
+
+
+def fetch_and_upload(url, cookies, fmt, destination="github"):
+    """Downloads a single video at the requested quality (unchanged) and
+    delivers it either straight into the chat or via a GitHub Release link
+    (falling back to GitHub, with a note, if chat delivery isn't possible).
+    If the file is too big for GitHub's 2GB asset limit, splits it into
+    parts (no quality loss, just a stream copy). Returns (title, links, note)
+    — links is empty when the file was delivered directly into the chat."""
     file_path, title = download_video_with_retry(url, cookies, fmt)
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    tag = f"vid-{int(time.time())}-{os.getpid()}"
 
+    if destination == "chat":
+        if size_mb <= MAX_TELEGRAM_UPLOAD / (1024 * 1024):
+            try:
+                send_file_to_chat(file_path, title, fmt)
+                os.remove(file_path)
+                log_stat(title, url, size_mb)
+                return title, [], " (در چت فرستاده شد ✅)"
+            except Exception as e:
+                print(f"telegram upload failed, falling back to GitHub: {e}")
+                fallback_note = " (ارسال در چت شکست خورد، روی گیت‌هاب آپلود شد)"
+        else:
+            print(f"file too big for chat delivery ({size_mb:.1f}MB), falling back to GitHub")
+            fallback_note = " (حجم فایل بیشتر از سقف ۵۰ مگابایتی ارسال در چت بود، روی گیت‌هاب آپلود شد)"
+    else:
+        fallback_note = ""
+
+    tag = f"vid-{int(time.time())}-{os.getpid()}"
     try:
         link = upload_to_release(file_path, tag)
         os.remove(file_path)
         log_stat(title, url, size_mb)
-        return title, [link], ""
+        return title, [link], fallback_note
     except Exception as e:
         if "must be less than" not in str(e):
             os.remove(file_path)
@@ -413,24 +447,27 @@ def fetch_and_upload(url, cookies, fmt):
         if os.path.exists(file_path):
             os.remove(file_path)
     log_stat(title, url, size_mb)
-    note = f" (فایل به {len(links)} پارت تقسیم شد چون حجمش بیشتر از سقف ۲ گیگ گیت‌هاب بود)"
+    note = fallback_note + f" (فایل به {len(links)} پارت تقسیم شد چون حجمش بیشتر از سقف ۲ گیگ گیت‌هاب بود)"
     return title, links, note
 
 
 def format_links(title, links):
+    if not links:
+        return title
     if len(links) == 1:
         return f"{title}\n{links[0]}"
     parts_text = "\n".join(f"پارت {i}: {l}" for i, l in enumerate(links, 1))
     return f"{title}\n{parts_text}"
 
 
-def download_and_send(url, cookies, fmt, status_message_id=None, label=None):
-    title, links, note = fetch_and_upload(url, cookies, fmt)
+def download_and_send(url, cookies, fmt, status_message_id=None, label=None, destination="github"):
+    title, links, note = fetch_and_upload(url, cookies, fmt, destination)
     edit_message(status_message_id, f"{label + ' ' if label else ''}دانلود تمام شد ✅{note}")
-    send_message(format_links(title, links))
+    if links:
+        send_message(format_links(title, links))
 
 
-def download_playlist(url, cookies, fmt, status_message_id=None, range_start=None, range_end=None):
+def download_playlist(url, cookies, fmt, status_message_id=None, range_start=None, range_end=None, destination="github"):
     cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies, url) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -459,11 +496,11 @@ def download_playlist(url, cookies, fmt, status_message_id=None, range_start=Non
         edit_message(status_message_id, f"در حال دانلود ({i}/{len(entries)})... ⏳")
         video_url = f"https://www.youtube.com/watch?v={e['id']}"
         try:
-            title, links, note = fetch_and_upload(video_url, cookies, fmt)
+            title, links, note = fetch_and_upload(video_url, cookies, fmt, destination)
             send_message(f"✅ ({i}/{len(entries)}) {note}\n{format_links(title, links)}")
             done += 1
         except Exception as ex:
-            item_retry = {"inline_keyboard": [[{"text": "🔄 دوباره امتحان کن", "callback_data": f"{e['id']}|{fmt}"}]]}
+            item_retry = {"inline_keyboard": [[{"text": "🔄 دوباره امتحان کن", "callback_data": f"{e['id']}|{fmt}|{destination}"}]]}
             send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}", item_retry)
         time.sleep(3)
 
@@ -485,11 +522,11 @@ def main():
         return
 
     if is_playlist_url(URL):
-        download_playlist(URL, cookies, FORMAT, STATUS_MESSAGE_ID, RANGE_START, RANGE_END)
+        download_playlist(URL, cookies, FORMAT, STATUS_MESSAGE_ID, RANGE_START, RANGE_END, DESTINATION)
         return
 
     try:
-        download_and_send(URL, cookies, FORMAT, status_message_id=STATUS_MESSAGE_ID)
+        download_and_send(URL, cookies, FORMAT, status_message_id=STATUS_MESSAGE_ID, destination=DESTINATION)
     except Exception as e:
         edit_message(STATUS_MESSAGE_ID, f"خطا در دانلود: {e}", retry_keyboard())
         if not STATUS_MESSAGE_ID:
