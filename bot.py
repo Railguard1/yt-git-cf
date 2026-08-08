@@ -134,8 +134,11 @@ def list_formats(url, cookies):
     ref = build_ref(url, video_id)
     title = info.get("title", "ویدیو")
     thumbnail = info.get("thumbnail")
+    formats = info.get("formats", [])
 
-    heights = sorted({f.get("height") for f in info.get("formats", []) if f.get("height")}, reverse=True)
+    video_formats = [f for f in formats if f.get("vcodec") not in (None, "none")]
+
+    heights = sorted({f.get("height") for f in video_formats if f.get("height")}, reverse=True)
     max_h = heights[0] if heights else None
     tiers = [h for h in [1080, 720, 480, 360, 240] if max_h and h <= max_h]
     if not tiers and max_h:
@@ -143,15 +146,15 @@ def list_formats(url, cookies):
 
     buttons = [[{"text": f"{h}p", "callback_data": f"{ref}|{h}"}] for h in tiers]
 
-    has_audio = any(f.get("vcodec") == "none" for f in info.get("formats", []))
-    if has_audio:
+    has_audio = any(f.get("vcodec") == "none" and f.get("acodec") not in (None, "none") for f in formats)
+    if has_audio and video_formats:
         buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"{ref}|audio"}])
 
     if not buttons:
-        formats = info.get("formats", [])
-        if formats:
-            # e.g. an Instagram photo post, or a single-format post with
-            # no height metadata — offer a plain download button
+        platform = platform_of(url)
+        if platform != "twitter" and formats:
+            # e.g. an Instagram photo post — a real downloadable image,
+            # not just a link-preview thumbnail, so offer to grab it
             buttons = [[{"text": "دانلود 📥", "callback_data": f"{ref}|best"}]]
         else:
             send_message("این پست هیچ ویدیو یا فایل قابل‌دانلودی نداره (شاید فقط متن/عکسه، یا محتوای اصلی توی یه پست دیگه‌ست که این پست فقط بهش اشاره کرده).")
