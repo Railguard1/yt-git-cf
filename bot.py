@@ -442,9 +442,17 @@ def convert_to_gif(file_path):
     return gif_path, trim_note
 
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
 def send_file_to_chat(file_path, title, fmt):
-    method = "sendAudio" if fmt == "audio" else "sendVideo"
-    field = "audio" if fmt == "audio" else "video"
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in IMAGE_EXTS:
+        method, field = "sendPhoto", "photo"
+    elif fmt == "audio":
+        method, field = "sendAudio", "audio"
+    else:
+        method, field = "sendVideo", "video"
     with open(file_path, "rb") as f:
         resp = requests.post(
             f"{API}/{method}",
@@ -479,7 +487,8 @@ def fetch_and_upload(url, cookies, fmt, destination="github", media_type="video"
     file_path, title = download_video_with_retry(url, cookies, fmt)
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
-    if destination == "chat" and media_type == "gif" and fmt != "audio":
+    is_image = os.path.splitext(file_path)[1].lower() in IMAGE_EXTS
+    if destination == "chat" and media_type == "gif" and fmt != "audio" and not is_image:
         try:
             gif_path, trim_note = convert_to_gif(file_path)
             gif_size = os.path.getsize(gif_path) / (1024 * 1024)
