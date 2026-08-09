@@ -24,8 +24,10 @@ RANGE_END = os.environ.get("RANGE_END") or None
 LIST_ID = os.environ.get("LIST_ID") or None
 RAW_CALLBACK_DATA = os.environ.get("RAW_CALLBACK_DATA") or None
 DESTINATION = os.environ.get("DESTINATION") or "github"
+MEDIA_TYPE = os.environ.get("MEDIA_TYPE") or "video"
 MAX_PLAYLIST_ITEMS = 20
 MAX_TELEGRAM_UPLOAD = 49 * 1024 * 1024  # stay safely under the 50MB bot API limit
+GIF_MAX_SECONDS = 15
 
 
 def send_message(text, reply_markup=None):
@@ -167,11 +169,32 @@ def list_formats(url, cookies):
     if not tiers and max_h:
         tiers = [max_h]
 
-    buttons = [[{"text": f"{h}p", "callback_data": f"{ref}|{h}"}] for h in tiers]
+    audio_formats = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")]
+    audio_size = 0
+    if audio_formats:
+        best_audio = max(audio_formats, key=lambda f: f.get("abr") or 0)
+        audio_size = best_audio.get("filesize") or best_audio.get("filesize_approx") or 0
+
+    def size_label(num_bytes):
+        if not num_bytes:
+            return ""
+        mb = num_bytes / (1024 * 1024)
+        return f" (~{mb / 1024:.1f}GB)" if mb >= 1024 else f" (~{mb:.0f}MB)"
+
+    buttons = []
+    for h in tiers:
+        matching = [f for f in video_formats if f.get("height") == h] or \
+                   [f for f in video_formats if f.get("height") and f["height"] <= h]
+        vsize = 0
+        if matching:
+            best = max(matching, key=lambda f: f.get("height") or 0)
+            vsize = best.get("filesize") or best.get("filesize_approx") or 0
+        label = f"{h}p{size_label(vsize + audio_size)}"
+        buttons.append([{"text": label, "callback_data": f"{ref}|{h}"}])
 
     has_audio = any(f.get("vcodec") == "none" and f.get("acodec") not in (None, "none") for f in formats)
     if has_audio and video_formats:
-        buttons.append([{"text": "فقط صدا 🎵", "callback_data": f"{ref}|audio"}])
+        buttons.append([{"text": f"فقط صدا 🎵{size_label(audio_size)}", "callback_data": f"{ref}|audio"}])
 
     if not buttons:
         platform = platform_of(url)
@@ -389,6 +412,36 @@ def log_stat(title, url, size_mb):
         print(f"failed to log stat: {e}")
 
 
+def convert_to_gif(file_path):
+    duration = get_duration(file_path)
+    clip_duration = min(duration, GIF_MAX_SECONDS)
+    base, _ = os.path.splitext(file_path)
+    palette = f"{base}_palette.png"
+    gif_path = f"{base}.gif"
+
+    gen = subprocess.run(
+        ["ffmpeg", "-y", "-t", str(clip_duration), "-i", file_path,
+         "-vf", "fps=12,scale=480:-1:flags=lanczos", palette],
+        capture_output=True, text=True,
+    )
+    if gen.returncode != 0:
+        raise RuntimeError(f"gif palette generation failed: {gen.stderr[-500:]}")
+
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-t", str(clip_duration), "-i", file_path, "-i", palette,
+         "-lavfi", "fps=12,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse",
+         gif_path],
+        capture_output=True, text=True,
+    )
+    if os.path.exists(palette):
+        os.remove(palette)
+    if result.returncode != 0:
+        raise RuntimeError(f"gif conversion failed: {result.stderr[-500:]}")
+
+    trim_note = f" (فقط {GIF_MAX_SECONDS} ثانیه اول تبدیل شد، چون GIF سقف طول داره)" if duration > GIF_MAX_SECONDS else ""
+    return gif_path, trim_note
+
+
 def send_file_to_chat(file_path, title, fmt):
     method = "sendAudio" if fmt == "audio" else "sendVideo"
     field = "audio" if fmt == "audio" else "video"
@@ -403,15 +456,44 @@ def send_file_to_chat(file_path, title, fmt):
         raise RuntimeError(f"telegram upload failed: {resp.status_code} {resp.text[:300]}")
 
 
-def fetch_and_upload(url, cookies, fmt, destination="github"):
+def send_animation_to_chat(file_path, caption):
+    with open(file_path, "rb") as f:
+        resp = requests.post(
+            f"{API}/sendAnimation",
+            data={"chat_id": CHAT_ID, "caption": caption[:1024]},
+            files={"animation": f},
+            timeout=300,
+        )
+    if not resp.ok:
+        raise RuntimeError(f"telegram animation upload failed: {resp.status_code} {resp.text[:300]}")
+
+
+def fetch_and_upload(url, cookies, fmt, destination="github", media_type="video"):
     """Downloads a single video at the requested quality (unchanged) and
-    delivers it either straight into the chat or via a GitHub Release link
-    (falling back to GitHub, with a note, if chat delivery isn't possible).
-    If the file is too big for GitHub's 2GB asset limit, splits it into
-    parts (no quality loss, just a stream copy). Returns (title, links, note)
-    — links is empty when the file was delivered directly into the chat."""
+    delivers it either straight into the chat (as a video/audio file or as
+    a GIF) or via a GitHub Release link — falling back to GitHub, with a
+    note, if chat delivery isn't possible. If the file is too big for
+    GitHub's 2GB asset limit, splits it into parts (no quality loss, just
+    a stream copy). Returns (title, links, note) — links is empty when the
+    file was delivered directly into the chat."""
     file_path, title = download_video_with_retry(url, cookies, fmt)
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
+
+    if destination == "chat" and media_type == "gif" and fmt != "audio":
+        try:
+            gif_path, trim_note = convert_to_gif(file_path)
+            gif_size = os.path.getsize(gif_path) / (1024 * 1024)
+            if gif_size <= MAX_TELEGRAM_UPLOAD / (1024 * 1024):
+                send_animation_to_chat(gif_path, title)
+                os.remove(gif_path)
+                os.remove(file_path)
+                log_stat(title, url, gif_size)
+                return title, [], f" (به‌صورت GIF فرستاده شد ✅{trim_note})"
+            os.remove(gif_path)
+            print(f"gif too big ({gif_size:.1f}MB) even after trimming, falling back to normal video")
+        except Exception as e:
+            print(f"gif conversion failed, falling back to normal video: {e}")
+        media_type = "video"  # fall through below, reusing the already-downloaded file_path
 
     if destination == "chat":
         if size_mb <= MAX_TELEGRAM_UPLOAD / (1024 * 1024):
@@ -460,14 +542,14 @@ def format_links(title, links):
     return f"{title}\n{parts_text}"
 
 
-def download_and_send(url, cookies, fmt, status_message_id=None, label=None, destination="github"):
-    title, links, note = fetch_and_upload(url, cookies, fmt, destination)
+def download_and_send(url, cookies, fmt, status_message_id=None, label=None, destination="github", media_type="video"):
+    title, links, note = fetch_and_upload(url, cookies, fmt, destination, media_type)
     edit_message(status_message_id, f"{label + ' ' if label else ''}دانلود تمام شد ✅{note}")
     if links:
         send_message(format_links(title, links))
 
 
-def download_playlist(url, cookies, fmt, status_message_id=None, range_start=None, range_end=None, destination="github"):
+def download_playlist(url, cookies, fmt, status_message_id=None, range_start=None, range_end=None, destination="github", media_type="video"):
     cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings"] + client_args(cookies, url) + [url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -496,11 +578,11 @@ def download_playlist(url, cookies, fmt, status_message_id=None, range_start=Non
         edit_message(status_message_id, f"در حال دانلود ({i}/{len(entries)})... ⏳")
         video_url = f"https://www.youtube.com/watch?v={e['id']}"
         try:
-            title, links, note = fetch_and_upload(video_url, cookies, fmt, destination)
+            title, links, note = fetch_and_upload(video_url, cookies, fmt, destination, media_type)
             send_message(f"✅ ({i}/{len(entries)}) {note}\n{format_links(title, links)}")
             done += 1
         except Exception as ex:
-            item_retry = {"inline_keyboard": [[{"text": "🔄 دوباره امتحان کن", "callback_data": f"{e['id']}|{fmt}|{destination}"}]]}
+            item_retry = {"inline_keyboard": [[{"text": "🔄 دوباره امتحان کن", "callback_data": f"{e['id']}|{fmt}|{destination}|{media_type}"}]]}
             send_message(f"❌ ({i}/{len(entries)}) خطا: {ex}", item_retry)
         time.sleep(3)
 
@@ -522,11 +604,11 @@ def main():
         return
 
     if is_playlist_url(URL):
-        download_playlist(URL, cookies, FORMAT, STATUS_MESSAGE_ID, RANGE_START, RANGE_END, DESTINATION)
+        download_playlist(URL, cookies, FORMAT, STATUS_MESSAGE_ID, RANGE_START, RANGE_END, DESTINATION, MEDIA_TYPE)
         return
 
     try:
-        download_and_send(URL, cookies, FORMAT, status_message_id=STATUS_MESSAGE_ID, destination=DESTINATION)
+        download_and_send(URL, cookies, FORMAT, status_message_id=STATUS_MESSAGE_ID, destination=DESTINATION, media_type=MEDIA_TYPE)
     except Exception as e:
         edit_message(STATUS_MESSAGE_ID, f"خطا در دانلود: {e}", retry_keyboard())
         if not STATUS_MESSAGE_ID:
