@@ -13,6 +13,18 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 REPO = os.environ["GITHUB_REPOSITORY"]
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+def _local_api_up():
+    try:
+        requests.get("http://127.0.0.1:8081", timeout=1.5)
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
+LOCAL_API_UP = _local_api_up()
+FILE_API = f"http://127.0.0.1:8081/bot{BOT_TOKEN}" if LOCAL_API_UP else API
+if LOCAL_API_UP:
+    print("local Telegram Bot API server detected — chat uploads capped at ~1.9GB instead of 50MB")
+
 MODE = os.environ.get("MODE", "download")
 URL = os.environ.get("VIDEO_URL", "")
 CHAT_ID = os.environ["CHAT_ID"]
@@ -26,7 +38,7 @@ RAW_CALLBACK_DATA = os.environ.get("RAW_CALLBACK_DATA") or None
 DESTINATION = os.environ.get("DESTINATION") or "github"
 MEDIA_TYPE = os.environ.get("MEDIA_TYPE") or "video"
 MAX_PLAYLIST_ITEMS = 20
-MAX_TELEGRAM_UPLOAD = 49 * 1024 * 1024  # stay safely under the 50MB bot API limit
+MAX_TELEGRAM_UPLOAD = (1900 if LOCAL_API_UP else 49) * 1024 * 1024
 GIF_MAX_SECONDS = 15
 
 
@@ -398,19 +410,6 @@ def split_and_upload(file_path, tag_prefix):
     return links
 
 
-def log_stat(title, url, size_mb):
-    try:
-        entry = {
-            "ts": int(time.time()),
-            "title": title,
-            "platform": platform_of(url),
-            "size_mb": round(size_mb, 1),
-        }
-        with open("stats.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"failed to log stat: {e}")
-
 
 def convert_to_gif(file_path):
     duration = get_duration(file_path)
@@ -455,10 +454,10 @@ def send_file_to_chat(file_path, title, fmt):
         method, field = "sendVideo", "video"
     with open(file_path, "rb") as f:
         resp = requests.post(
-            f"{API}/{method}",
+            f"{FILE_API}/{method}",
             data={"chat_id": CHAT_ID, "caption": title[:1024]},
             files={field: f},
-            timeout=600,
+            timeout=1200,
         )
     if not resp.ok:
         raise RuntimeError(f"telegram upload failed: {resp.status_code} {resp.text[:300]}")
@@ -467,10 +466,10 @@ def send_file_to_chat(file_path, title, fmt):
 def send_animation_to_chat(file_path, caption):
     with open(file_path, "rb") as f:
         resp = requests.post(
-            f"{API}/sendAnimation",
+            f"{FILE_API}/sendAnimation",
             data={"chat_id": CHAT_ID, "caption": caption[:1024]},
             files={"animation": f},
-            timeout=300,
+            timeout=600,
         )
     if not resp.ok:
         raise RuntimeError(f"telegram animation upload failed: {resp.status_code} {resp.text[:300]}")
@@ -496,7 +495,6 @@ def fetch_and_upload(url, cookies, fmt, destination="github", media_type="video"
                 send_animation_to_chat(gif_path, title)
                 os.remove(gif_path)
                 os.remove(file_path)
-                log_stat(title, url, gif_size)
                 return title, [], f" (به‌صورت GIF فرستاده شد ✅{trim_note})"
             os.remove(gif_path)
             print(f"gif too big ({gif_size:.1f}MB) even after trimming, falling back to normal video")
@@ -509,7 +507,6 @@ def fetch_and_upload(url, cookies, fmt, destination="github", media_type="video"
             try:
                 send_file_to_chat(file_path, title, fmt)
                 os.remove(file_path)
-                log_stat(title, url, size_mb)
                 return title, [], " (در چت فرستاده شد ✅)"
             except Exception as e:
                 print(f"telegram upload failed, falling back to GitHub: {e}")
@@ -524,7 +521,6 @@ def fetch_and_upload(url, cookies, fmt, destination="github", media_type="video"
     try:
         link = upload_to_release(file_path, tag)
         os.remove(file_path)
-        log_stat(title, url, size_mb)
         return title, [link], fallback_note
     except Exception as e:
         if "must be less than" not in str(e):
@@ -537,7 +533,6 @@ def fetch_and_upload(url, cookies, fmt, destination="github", media_type="video"
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
-    log_stat(title, url, size_mb)
     note = fallback_note + f" (فایل به {len(links)} پارت تقسیم شد چون حجمش بیشتر از سقف ۲ گیگ گیت‌هاب بود)"
     return title, links, note
 
