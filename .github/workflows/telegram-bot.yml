@@ -74,6 +74,28 @@ jobs:
           ffmpeg -version | head -n1
           ffprobe -version | head -n1
 
+      - name: Start local Telegram Bot API server (optional, raises chat upload limit to 2GB)
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          if [ -z "$TELEGRAM_API_ID" ] || [ -z "$TELEGRAM_API_HASH" ]; then
+            echo "TELEGRAM_API_ID/TELEGRAM_API_HASH not set — skipping, chat uploads stay capped at 50MB"
+            exit 0
+          fi
+          mkdir -p /tmp/tgapi-storage
+          docker run -d --name tgapi --network host \
+            -v /tmp/tgapi-storage:/tmp/tgapi-storage \
+            heilkit/telegram-bot-api \
+            -d /tmp/tgapi-storage -v 1 --local --api-id="$TELEGRAM_API_ID" --api-hash="$TELEGRAM_API_HASH"
+          for i in $(seq 1 20); do
+            if curl -s http://127.0.0.1:8081/ > /dev/null; then
+              echo "local bot api server is up"
+              break
+            fi
+            sleep 1
+          done
+
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -93,19 +115,3 @@ jobs:
           RANGE_END: ${{ github.event.client_payload.range_end }}
           RAW_CALLBACK_DATA: ${{ github.event.client_payload.raw_callback_data }}
         run: python bot.py
-
-      - name: Commit stats
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          for i in 1 2 3 4 5; do
-            git add stats.jsonl 2>/dev/null || true
-            if git diff --cached --quiet; then
-              echo "no stats changes"
-              break
-            fi
-            git commit -m "log stats" && git pull --rebase && git push && break
-            echo "push failed, retrying ($i)..."
-            sleep $((RANDOM % 5 + 1))
-          done
