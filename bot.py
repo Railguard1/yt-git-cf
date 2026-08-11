@@ -295,7 +295,7 @@ def ascii_safe_name(filename):
 def download_video(url, cookies, fmt):
     """Downloads the video and returns (safe_filename, display_title)."""
     before = set(os.listdir("."))
-    cmd = ["yt-dlp", "-f", build_selector(fmt), "--no-playlist", "-o", "%(title)s.%(ext)s"]
+    cmd = ["yt-dlp", "-v", "-f", build_selector(fmt), "--no-playlist", "-o", "%(title)s.%(ext)s"]
     if fmt not in ("audio", "best"):
         cmd += ["--merge-output-format", "mp4"]
     cmd += client_args(cookies, url)
@@ -303,7 +303,8 @@ def download_video(url, cookies, fmt):
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout[-1500:])
-    print(result.stderr[-1500:])
+    print("---- STDERR (full) ----")
+    print(result.stderr)
     if result.returncode != 0:
         raise RuntimeError(result.stderr[-800:] or result.stdout[-800:])
 
