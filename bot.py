@@ -109,7 +109,7 @@ def client_args(cookies, url):
     if platform in ("instagram", "twitter"):
         args = ["--cookies", cookies_file] if cookies_file else []
     elif cookies_file:
-        args = ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=mweb,web_safari,tv"]
+        args = ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web_safari,tv"]
     else:
         args = ["--extractor-args", "youtube:player_client=android,ios,web_safari,tv"]
     print(f"[{platform}] using cookies={bool(cookies_file)} args={args}")
