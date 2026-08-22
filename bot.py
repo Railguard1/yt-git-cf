@@ -79,6 +79,7 @@ def setup_cookies():
         ("youtube", "YTDLP_COOKIES_B64", "cookies_youtube.txt"),
         ("instagram", "IG_COOKIES_B64", "cookies_instagram.txt"),
         ("twitter", "TWITTER_COOKIES_B64", "cookies_twitter.txt"),
+        ("soundcloud", "SOUNDCLOUD_COOKIES_B64", "cookies_soundcloud.txt"),
     ]:
         b64 = os.environ.get(env_name)
         if not b64:
@@ -100,13 +101,15 @@ def platform_of(url):
         return "instagram"
     if "twitter.com" in url or "x.com" in url:
         return "twitter"
+    if "soundcloud.com" in url:
+        return "soundcloud"
     return "youtube"
 
 
 def client_args(cookies, url):
     platform = platform_of(url)
     cookies_file = cookies.get(platform)
-    if platform in ("instagram", "twitter"):
+    if platform in ("instagram", "twitter", "soundcloud"):
         args = ["--cookies", cookies_file] if cookies_file else []
     elif cookies_file:
         args = ["--cookies", cookies_file, "--extractor-args", "youtube:player_client=web_safari,tv"]
@@ -137,6 +140,10 @@ def build_ref(url, video_id):
         m = re.search(r"status/(\d+)", url)
         tw_id = m.group(1) if m else video_id
         return f"TW:{tw_id}"
+    if platform == "soundcloud":
+        m = re.search(r"soundcloud\.com/([^?#]+)", url)
+        path = m.group(1).rstrip("/") if m else str(video_id)
+        return f"SC:{path[:50]}"
     return video_id  # youtube — unprefixed, unchanged
 
 
@@ -211,6 +218,10 @@ def list_formats(url, cookies):
         has_audio = any(f.get("vcodec") == "none" and f.get("acodec") not in (None, "none") for f in formats)
         if has_audio and video_formats:
             buttons.append([{"text": f"فقط صدا 🎵{size_label(audio_size)}", "callback_data": f"{ref}|audio"}])
+    elif platform == "soundcloud" and audio_formats:
+        best_audio = max(audio_formats, key=lambda f: f.get("abr") or 0)
+        asize = best_audio.get("filesize") or best_audio.get("filesize_approx") or 0
+        buttons.append([{"text": f"دانلود 🎵{size_label(asize)}", "callback_data": f"{ref}|audio"}])
     elif video_formats:
         # Instagram/Twitter: usually just one real quality, and "height"
         # means something different for portrait video — don't build a
