@@ -102,6 +102,7 @@ jobs:
           YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
           IG_COOKIES_B64: ${{ secrets.IG_COOKIES_B64 }}
           TWITTER_COOKIES_B64: ${{ secrets.TWITTER_COOKIES_B64 }}
+          SOUNDCLOUD_COOKIES_B64: ${{ secrets.SOUNDCLOUD_COOKIES_B64 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODE: ${{ (github.event.action == 'yt_list_formats' && 'list') || (github.event.action == 'yt_playlist_range' && 'playlist_range') || (github.event.inputs.mode || 'download') }}
           VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
