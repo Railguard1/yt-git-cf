@@ -175,17 +175,7 @@ def list_formats(url, cookies):
         print(f"no video formats found. top-level keys: {list(info.keys())}")
         print(f"formats count: {len(formats)}, sample: {formats[:2]}")
 
-    heights = sorted({f.get("height") for f in video_formats if f.get("height")}, reverse=True)
-    max_h = heights[0] if heights else None
-    tiers = [h for h in [1080, 720, 480, 360, 240] if max_h and h <= max_h]
-    if not tiers and max_h:
-        tiers = [max_h]
-
-    audio_formats = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")]
-    audio_size = 0
-    if audio_formats:
-        best_audio = max(audio_formats, key=lambda f: f.get("abr") or 0)
-        audio_size = best_audio.get("filesize") or best_audio.get("filesize_approx") or 0
+    platform = platform_of(url)
 
     def size_label(num_bytes):
         if not num_bytes:
@@ -193,23 +183,43 @@ def list_formats(url, cookies):
         mb = num_bytes / (1024 * 1024)
         return f" (~{mb / 1024:.1f}GB)" if mb >= 1024 else f" (~{mb:.0f}MB)"
 
-    buttons = []
-    for h in tiers:
-        matching = [f for f in video_formats if f.get("height") == h] or \
-                   [f for f in video_formats if f.get("height") and f["height"] <= h]
-        vsize = 0
-        if matching:
-            best = max(matching, key=lambda f: f.get("height") or 0)
-            vsize = best.get("filesize") or best.get("filesize_approx") or 0
-        label = f"{h}p{size_label(vsize + audio_size)}"
-        buttons.append([{"text": label, "callback_data": f"{ref}|{h}"}])
+    audio_formats = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")]
+    audio_size = 0
+    if audio_formats:
+        best_audio = max(audio_formats, key=lambda f: f.get("abr") or 0)
+        audio_size = best_audio.get("filesize") or best_audio.get("filesize_approx") or 0
 
-    has_audio = any(f.get("vcodec") == "none" and f.get("acodec") not in (None, "none") for f in formats)
-    if has_audio and video_formats:
-        buttons.append([{"text": f"فقط صدا 🎵{size_label(audio_size)}", "callback_data": f"{ref}|audio"}])
+    buttons = []
+
+    if platform == "youtube":
+        heights = sorted({f.get("height") for f in video_formats if f.get("height")}, reverse=True)
+        max_h = heights[0] if heights else None
+        tiers = [h for h in [1080, 720, 480, 360, 240] if max_h and h <= max_h]
+        if not tiers and max_h:
+            tiers = [max_h]
+
+        for h in tiers:
+            matching = [f for f in video_formats if f.get("height") == h] or \
+                       [f for f in video_formats if f.get("height") and f["height"] <= h]
+            vsize = 0
+            if matching:
+                best = max(matching, key=lambda f: f.get("height") or 0)
+                vsize = best.get("filesize") or best.get("filesize_approx") or 0
+            label = f"{h}p{size_label(vsize + audio_size)}"
+            buttons.append([{"text": label, "callback_data": f"{ref}|{h}"}])
+
+        has_audio = any(f.get("vcodec") == "none" and f.get("acodec") not in (None, "none") for f in formats)
+        if has_audio and video_formats:
+            buttons.append([{"text": f"فقط صدا 🎵{size_label(audio_size)}", "callback_data": f"{ref}|audio"}])
+    elif video_formats:
+        # Instagram/Twitter: usually just one real quality, and "height"
+        # means something different for portrait video — don't build a
+        # fake quality ladder, just offer the best format directly
+        best = max(video_formats, key=lambda f: (f.get("height") or 0) * (f.get("width") or 1))
+        vsize = best.get("filesize") or best.get("filesize_approx") or 0
+        buttons.append([{"text": f"دانلود 📥{size_label(vsize)}", "callback_data": f"{ref}|best"}])
 
     if not buttons:
-        platform = platform_of(url)
         if platform != "twitter" and formats:
             # e.g. an Instagram photo post — a real downloadable image,
             # not just a link-preview thumbnail, so offer to grab it
